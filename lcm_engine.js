@@ -700,12 +700,20 @@
     }
     var map = {};
     bySlot.forEach(function (evs, slotOff) {
+      if (evs.some(function (e) { return e.tableV3Ops && e.tableV3Ops.length > 0; })) {
+        map[slotOff] = "dsi_set_cmdq_V3";
+        return;
+      }
       if (evs.some(function (e) { return e.arg2Bytes.length > 0 || (e.args[0] <= 0xff && e.args[1] <= 128 && (e.args[3] === 0 || e.args[3] === 1) && e.args[2] >= 0x10000); })) {
         map[slotOff] = "dsi_set_cmdq_V2";
         return;
       }
       if (evs.some(function (e) { return e.arg0Words.length > 0; })) {
         map[slotOff] = "dsi_set_cmdq";
+        return;
+      }
+      if (evs.some(function (e) { return e.args[0] >= 0x10000 && e.args[1] >= 1 && e.args[1] <= 1024 && (e.args[2] === 0 || e.args[2] === 1 || e.args[2] === 2); })) {
+        map[slotOff] = "dsi_set_cmdq_V3";
         return;
       }
       if (slotOff === 0 && evs.every(function (e) { return e.args[0] === 0 || e.args[0] === 1; })) {
@@ -737,13 +745,20 @@
     return map;
   }
 
-  function eventsToOps(events, slotRoles) {
+  function eventsToOps(events, slotRoles, data, base) {
     var ops = [];
     for (var i = 0; i < events.length; i++) {
       var ev = events[i];
       if (ev.kind === "UTIL_SLOT" && ev.slotOffset !== null) {
         var role = slotRoles[ev.slotOffset] || "";
-        if (role === "dsi_set_cmdq_V2") {
+        if (role === "dsi_set_cmdq_V3") {
+          if (ev.tableV3Ops && ev.tableV3Ops.length > 0) {
+            for (var v3 = 0; v3 < ev.tableV3Ops.length; v3++) ops.push(ev.tableV3Ops[v3]);
+          } else if (ev.args[0] >= 0x10000 && data && base) {
+            var dynOps = AE.tryDecodeSettingTableV3(data, base, ev.args[0], ev.args[1]);
+            for (var d3 = 0; d3 < dynOps.length; d3++) ops.push(dynOps[d3]);
+          }
+        } else if (role === "dsi_set_cmdq_V2") {
           var cnt = ev.args[1] & 0xff;
           ops.push({ opType: "DCS_WRITE", cmd: ev.args[0] & 0xff, params: ev.arg2Bytes.slice(0, cnt), delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: ev.callSite, status: "CONFIRMED", rawEncoding: "slot+0x" + ev.slotOffset.toString(16) });
         } else if (role === "dsi_set_cmdq" && ev.arg0Words.length > 0) {
@@ -936,7 +951,7 @@
         if (tw === 0) zcnt++;
         else if (tw < base || tw >= endVa) { tailOk = false; break; }
       }
-      if (!tailOk || zcnt < 2) continue;
+      if (!tailOk || zcnt < 1) continue;
 
       var structVa = (base + idx * 4) >>> 0;
       if (!firstXref.has(structVa)) continue;
@@ -1029,6 +1044,10 @@
           functions[optMap[sKey]] = { role: optMap[sKey], slotIndex: sNum, address: oVa, mode: (oVa & 1) ? "THUMB" : "ARM", size: opf.size, status: "INFERRED" };
         }
       }
+      if (gpIdx === 3 && slots[2] && looksLikeCodeEntry32(data, base, slots[2])) {
+        var gnProf = analyzeProfileQuick32(data, base, slots[2]);
+        functions.get_name = { role: "get_name", slotIndex: 2, address: slots[2], mode: (slots[2] & 1) ? "THUMB" : "ARM", size: gnProf.size, status: "INFERRED" };
+      }
 
       var suVa = functions.set_util_funcs ? functions.set_util_funcs.address : null;
       var initEvs = functions.init ? emu.executeWithUtilTraps(suVa, functions.init.address) : [];
@@ -1036,12 +1055,12 @@
       var cmpEvs = functions.compare_id ? emu.executeWithUtilTraps(suVa, functions.compare_id.address) : [];
 
       var slotRoles = inferUtilSlotMap(initEvs.concat(suspEvs), cmpEvs);
-      var initOps = eventsToOps(initEvs, slotRoles);
+      var initOps = eventsToOps(initEvs, slotRoles, data, base);
       if (!initOps.some(function (op) { return op.opType === "DCS_WRITE"; }) && functions.init) {
         var stOps = AE.findStaticSettingTable(data, base, functions.init.address);
         if (stOps.length) initOps = initOps.concat(stOps);
       }
-      var suspOps = eventsToOps(suspEvs, slotRoles);
+      var suspOps = eventsToOps(suspEvs, slotRoles, data, base);
       if (!suspOps.some(function (op) { return op.opType === "DCS_WRITE"; }) && functions.suspend) {
         var stSusp = AE.findStaticSettingTable(data, base, functions.suspend.address);
         if (stSusp.length) suspOps = suspOps.concat(stSusp);
@@ -1056,7 +1075,7 @@
 
       var idDet = null;
       if (functions.compare_id) {
-        var cmpOps = eventsToOps(cmpEvs, slotRoles);
+        var cmpOps = eventsToOps(cmpEvs, slotRoles, data, base);
         var expIds = AE.extractExpectedIdsStatic(data, base, functions.compare_id.address);
         var readOp = cmpOps.find(function (op) { return op.opType === "DCS_READ"; });
         idDet = {

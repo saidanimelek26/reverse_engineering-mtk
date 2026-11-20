@@ -1228,6 +1228,7 @@
           var arg0Words = [];
           var arg2Bytes = [];
           var arg1Bytes = [];
+          var tableV3Ops = [];
 
           if (r1 <= 255 && (r3 === 0 || r3 === 1) && self.isReadable(r2)) {
             for (var b = 0; b < r1; b++) arg2Bytes.push(self.readU8((r2 + b) >>> 0));
@@ -1238,6 +1239,9 @@
           if (r2 >= 1 && r2 <= 32 && r0 <= 0xff && self.isReadable(r1)) {
             for (var b2 = 0; b2 < r2; b2++) arg1Bytes.push(self.readU8((r1 + b2) >>> 0));
           }
+          if (self.isReadable(r0) && r1 >= 1 && r1 <= 1024 && (r2 === 0 || r2 === 1 || r2 === 2)) {
+            tableV3Ops = tryDecodeSettingTableV3(self.data, self.baseAddress, r0, r1);
+          }
 
           events.push({
             kind: "UTIL_SLOT",
@@ -1247,7 +1251,8 @@
             args: [r0, r1, r2, r3],
             arg0Words: arg0Words,
             arg2Bytes: arg2Bytes,
-            arg1Bytes: arg1Bytes
+            arg1Bytes: arg1Bytes,
+            tableV3Ops: tableV3Ops
           });
           self.regs[0] = 0;
           self.setBranch(lr);
@@ -1385,7 +1390,14 @@
           var curPc = (baseAddr + pos) >>> 0;
           var litAddr = (((curPc + 4) & ~3) + ((hw1 & 0xff) * 4)) >>> 0;
           var litOff = (litAddr - baseAddr) >>> 0;
-          if (litOff + 4 <= data.length) vals.push(dv.getUint32(litOff, true));
+          if (litOff + 4 <= data.length) {
+            var lval = dv.getUint32(litOff, true);
+            vals.push(lval);
+            var pcrel = (((curPc + 4) & ~3) + lval) >>> 0;
+            if (pcrel >= baseAddr && pcrel < baseAddr + data.length) vals.push(pcrel);
+            var baserel = (baseAddr + lval) >>> 0;
+            if (baserel >= baseAddr && baserel < baseAddr + data.length) vals.push(baserel);
+          }
         } else if ((hw1 & 0xfe00) === 0xbc00 && (hw1 & 0x0100) !== 0) {
           break;
         }
@@ -1406,7 +1418,14 @@
           }
         } else if ((w & 0x0fff0000) === 0x059f0000) {
           var litA = (off + 8 + (w & 0xfff)) >>> 0;
-          if (litA + 4 <= data.length) vals.push(dv.getUint32(litA, true));
+          if (litA + 4 <= data.length) {
+            var lvalA = dv.getUint32(litA, true);
+            vals.push(lvalA);
+            var pcrelA = (baseAddr + off + 8 + lvalA) >>> 0;
+            if (pcrelA >= baseAddr && pcrelA < baseAddr + data.length) vals.push(pcrelA);
+            var baserelA = (baseAddr + lvalA) >>> 0;
+            if (baserelA >= baseAddr && baserelA < baseAddr + data.length) vals.push(baserelA);
+          }
         } else if ((w & 0x0fff0fff) === 0x012fff1e || ((w & 0x0fff8000) === 0x08bd8000)) {
           break;
         }
@@ -1491,6 +1510,127 @@
     return ops;
   }
 
+  function tryDecodeSettingTableV3(data, baseAddr, tableVa, maxCount) {
+    var off = Number(BigInt.asUintN(64, BigInt(tableVa)) - BigInt.asUintN(64, BigInt(baseAddr))) >>> 0;
+    if (off < 0 || off + 64 > data.length) return [];
+    var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    maxCount = maxCount || 400;
+
+    var candidateStrides = [131, 132, 67, 68, 72, 76, 80, 136, 140];
+    var bestOps = [];
+    var bestScore = 0;
+
+    for (var si = 0; si < candidateStrides.length; si++) {
+      var stride = candidateStrides[si];
+      var ops = [];
+      var valid = true;
+      var foundEnd = false;
+      var consecutiveZeroes = 0;
+
+      for (var k = 0; k < maxCount; k++) {
+        var eOff = off + k * stride;
+        if (eOff + stride > data.length) break;
+
+        var id = data[eOff];
+        var cmd = data[eOff + 1];
+        var cnt = data[eOff + 2];
+
+        if (id === 0 && cmd === 0 && cnt === 0) {
+          consecutiveZeroes++;
+          if (consecutiveZeroes >= 2 && ops.length >= 2) {
+            foundEnd = true;
+            break;
+          }
+          if (consecutiveZeroes >= 3) {
+            valid = false;
+            break;
+          }
+          continue;
+        }
+        consecutiveZeroes = 0;
+
+        if (stride === 131 || stride === 132 || stride === 67 || stride === 68) {
+          var maxPayload = stride - 3;
+          if (id === 0xfd || (id === 0x00 && cmd === 0xfd)) {
+            foundEnd = true;
+            break;
+          } else if (id === 0x00 && (cmd === 0xff || cmd === 0xfe || cmd === 0xfc || cmd === 0xee)) {
+            var dval = cnt > 0 ? cnt : (data[eOff + 3] | (data[eOff + 4] << 8));
+            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, dval), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_DELAY_" + dval + "ms" });
+          } else if (id === 0xfe) {
+            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, cnt || cmd), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_DELAY" });
+          } else if (id === 0x39 || id === 0x15 || id === 0x05 || id === 0x29 || id === 0x03 || id === 0x13 || id === 0x23) {
+            if (cnt <= maxPayload) {
+              var plist = [];
+              for (var p = 0; p < cnt; p++) plist.push(data[eOff + 3 + p]);
+              ops.push({ opType: (id === 0x03 || id === 0x13 || id === 0x23 || id === 0x29) ? "GENERIC_WRITE" : "DCS_WRITE", cmd: cmd, params: plist, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_DCS_0x" + cmd.toString(16) });
+            } else {
+              valid = false;
+              break;
+            }
+          } else if (id <= 0xff && cnt <= maxPayload && cmd <= 0xff) {
+            var plist2 = [];
+            for (var p2 = 0; p2 < cnt; p2++) plist2.push(data[eOff + 3 + p2]);
+            ops.push({ opType: "DCS_WRITE", cmd: cmd, params: plist2, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "INFERRED", rawEncoding: "V3_GENERIC_0x" + cmd.toString(16) });
+          } else {
+            valid = false;
+            break;
+          }
+        } else if (stride === 72 || stride === 136) {
+          var wCmd = dv.getUint32(eOff, true);
+          var wCnt = dv.getUint32(eOff + 4, true);
+          if (wCmd === 0xfffd || wCmd === 0xfff || wCmd === 0xfd) {
+            foundEnd = true;
+            break;
+          } else if (wCmd === 0xfffe || wCmd === 0xffe || wCmd === 0xfe) {
+            var dval2 = wCnt > 0 && wCnt < 5000 ? wCnt : (data[eOff + 4] || 1);
+            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: dval2, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "REGFLAG_DELAY" });
+          } else if (wCmd <= 0xff && wCnt <= (stride - 8)) {
+            var pl3 = [];
+            for (var p3 = 0; p3 < wCnt; p3++) pl3.push(data[eOff + 8 + p3]);
+            ops.push({ opType: "DCS_WRITE", cmd: wCmd, params: pl3, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_32BIT_0x" + wCmd.toString(16) });
+          } else if (wCmd <= 0xff && data[eOff + 4] <= (stride - 5)) {
+            var bCnt = data[eOff + 4];
+            var pl4 = [];
+            for (var p4 = 0; p4 < bCnt; p4++) pl4.push(data[eOff + 5 + p4]);
+            ops.push({ opType: "DCS_WRITE", cmd: wCmd, params: pl4, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_8BIT_0x" + wCmd.toString(16) });
+          } else {
+            valid = false;
+            break;
+          }
+        } else if (stride === 76 || stride === 80 || stride === 140) {
+          var tId = dv.getUint32(eOff, true);
+          var tCmd = dv.getUint32(eOff + 4, true);
+          var tCnt = dv.getUint32(eOff + 8, true);
+          if (tId === 0xfffd || tCmd === 0xfffd || tId === 0xfd) {
+            foundEnd = true;
+            break;
+          } else if (tId === 0xfffe || tCmd === 0xfffe || (tId === 0 && tCmd === 0xff)) {
+            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, tCnt), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_76_DELAY" });
+          } else if (tCmd <= 0xff && tCnt <= (stride - 12)) {
+            var pl5 = [];
+            for (var p5 = 0; p5 < tCnt; p5++) pl5.push(data[eOff + 12 + p5]);
+            ops.push({ opType: "DCS_WRITE", cmd: tCmd, params: pl5, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "V3_76_0x" + tCmd.toString(16) });
+          } else {
+            valid = false;
+            break;
+          }
+        }
+      }
+
+      if (valid && (foundEnd || ops.length >= 3)) {
+        var dcsCount = ops.filter(function (o) { return o.opType === "DCS_WRITE" || o.opType === "GENERIC_WRITE"; }).length;
+        var score = dcsCount * 10 + (foundEnd ? 50 : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestOps = ops;
+        }
+      }
+    }
+
+    return bestOps;
+  }
+
   function tryDecodeStaticSettingTable(data, baseAddr, tableVa) {
     var off = (tableVa - baseAddr) >>> 0;
     if (tableVa < baseAddr || off + 72 > data.length) return [];
@@ -1568,8 +1708,10 @@
   }
 
   function findStaticSettingTable(data, baseAddr, fnVa) {
-    var vals = resolvePointerLiterals(data, baseAddr, fnVa, 0x380);
+    var vals = resolvePointerLiterals(data, baseAddr, fnVa, 0x500);
     for (var i = 0; i < vals.length; i++) {
+      var v3Ops = tryDecodeSettingTableV3(data, baseAddr, vals[i], 400);
+      if (v3Ops.length >= 2) return v3Ops;
       var ops = tryDecodeStaticSettingTable(data, baseAddr, vals[i]);
       if (ops.length >= 2) return ops;
     }
@@ -1685,6 +1827,7 @@
     resolvePointerLiterals: resolvePointerLiterals,
     decodePackedCmdqWords: decodePackedCmdqWords,
     tryDecodeStaticSettingTable: tryDecodeStaticSettingTable,
+    tryDecodeSettingTableV3: tryDecodeSettingTableV3,
     findStaticSettingTable: findStaticSettingTable,
     extractExpectedIdsStatic: extractExpectedIdsStatic,
     analyzeArm64FunctionFlow: analyzeArm64FunctionFlow
