@@ -17,6 +17,7 @@
   var sumFw = document.getElementById("sumFw");
   var sumActive = document.getElementById("sumActive");
   var sumBat = document.getElementById("sumBat");
+  var sumLkConfig = document.getElementById("sumLkConfig");
 
   var driverSelect = document.getElementById("driverSelect");
   var driverQuickMeta = document.getElementById("driverQuickMeta");
@@ -31,6 +32,11 @@
   var batteryDtsiPre = document.getElementById("batteryDtsiPre");
   var batteryHdrPre = document.getElementById("batteryHdrPre");
   var batteryRepPre = document.getElementById("batteryRepPre");
+
+  var lkConfigTable = document.querySelector("#lkConfigTable tbody");
+  var lkConfigEnvPre = document.getElementById("lkConfigEnvPre");
+  var lkConfigHdrPre = document.getElementById("lkConfigHdrPre");
+  var lkConfigReportPre = document.getElementById("lkConfigReportPre");
 
   var fnTbody = document.querySelector("#fnTable tbody");
   var paramTbody = document.querySelector("#paramTable tbody");
@@ -160,6 +166,38 @@
     if (batteryRepPre) batteryRepPre.textContent = fRep ? String(fRep.content) : "No report generated.";
   }
 
+  function renderLkConfig(res) {
+    if (!lkConfigTable) return;
+    lkConfigTable.innerHTML = "";
+    var cfg = res.lkConfig;
+    if (!cfg || !cfg.addresses || Object.keys(cfg.addresses).length === 0) {
+      if (sumLkConfig) sumLkConfig.textContent = "Not applicable for this target";
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td colspan=\"4\">No LK bootloader configuration addresses found. Upload an LK binary (lk.bin, lk.img) or bootloader image to discover BootShim / NovaOS symbols.</td>";
+      lkConfigTable.appendChild(tr);
+      if (lkConfigEnvPre) lkConfigEnvPre.textContent = "No LK config generated.";
+      if (lkConfigHdrPre) lkConfigHdrPre.textContent = "No LK config generated.";
+      if (lkConfigReportPre) lkConfigReportPre.textContent = "No LK config report generated.";
+      return;
+    }
+
+    var keys = Object.keys(cfg.addresses).sort();
+    if (sumLkConfig) sumLkConfig.textContent = cfg.chipset + " (" + keys.length + " addresses discovered)";
+
+    keys.forEach(function (k) {
+      var r = document.createElement("tr");
+      var va = "0x" + cfg.addresses[k].toString(16).toUpperCase().padStart(8, "0");
+      var conf = Math.round((cfg.confidence[k] || 0.90) * 100) + "%";
+      var ev = cfg.evidence[k] || "Autonomous structural analysis";
+      r.innerHTML = "<td class=\"mono\">CONFIG_" + k.toUpperCase() + "_ADDRESS</td><td class=\"mono\">" + va + "</td><td class=\"mono\">" + conf + "</td><td>" + ev + "</td>";
+      lkConfigTable.appendChild(r);
+    });
+
+    if (lkConfigEnvPre) lkConfigEnvPre.textContent = cfg.env || "";
+    if (lkConfigHdrPre) lkConfigHdrPre.textContent = cfg.header || "";
+    if (lkConfigReportPre) lkConfigReportPre.textContent = cfg.reportMd || "";
+  }
+
     function renderFileList(outFiles) {
     filesTbody.innerHTML = "";
     outFiles.forEach(function (f) {
@@ -229,6 +267,7 @@
       reportPre.textContent = res.addressesReportTxt;
       renderSelectedDriver();
       renderBattery(res);
+      renderLkConfig(res);
       renderFileList(res.outFiles);
 
       summarySection.classList.remove("hidden");
