@@ -83,6 +83,82 @@
     return s;
   }
 
+  function decompressLz4(raw) {
+    if (raw.length < 7) return null;
+    var dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    var magic = dv.getUint32(0, true);
+    if (magic !== 0x184D2204 && magic !== 0x184C2102) return null;
+    var p = 4;
+    if (magic === 0x184D2204) {
+      var flg = raw[p++];
+      var bd = raw[p++];
+      if (flg & 8) p += 8;
+      p++;
+    }
+    var outChunks = [];
+    var totalOut = 0;
+    while (p + 4 <= raw.length) {
+      var bSz = dv.getUint32(p, true);
+      p += 4;
+      if (bSz === 0 || bSz === 0x80000000) break;
+      var uncomp = (bSz & 0x80000000) !== 0;
+      var len = bSz & 0x7FFFFFFF;
+      if (p + len > raw.length) break;
+      if (uncomp) {
+        outChunks.push(raw.subarray(p, p + len));
+        totalOut += len;
+        p += len;
+        continue;
+      }
+      var bEnd = p + len;
+      var blockOut = new Uint8Array(65536 * 4);
+      var oPos = 0;
+      while (p < bEnd) {
+        var token = raw[p++];
+        var litLen = token >>> 4;
+        if (litLen === 15) {
+          var s = 0;
+          do { s = raw[p++]; litLen += s; } while (s === 255 && p < bEnd);
+        }
+        if (oPos + litLen > blockOut.length) {
+          var nB = new Uint8Array(Math.max(blockOut.length * 2, oPos + litLen + 65536));
+          nB.set(blockOut);
+          blockOut = nB;
+        }
+        blockOut.set(raw.subarray(p, p + litLen), oPos);
+        p += litLen;
+        oPos += litLen;
+        if (p >= bEnd) break;
+        var matchOff = raw[p] | (raw[p + 1] << 8);
+        p += 2;
+        var matchLen = (token & 0x0F) + 4;
+        if ((token & 0x0F) === 15) {
+          var s2 = 0;
+          do { s2 = raw[p++]; matchLen += s2; } while (s2 === 255 && p < bEnd);
+        }
+        if (oPos + matchLen > blockOut.length) {
+          var nB2 = new Uint8Array(Math.max(blockOut.length * 2, oPos + matchLen + 65536));
+          nB2.set(blockOut);
+          blockOut = nB2;
+        }
+        for (var m = 0; m < matchLen; m++) {
+          blockOut[oPos + m] = blockOut[oPos - matchOff + m];
+        }
+        oPos += matchLen;
+      }
+      outChunks.push(blockOut.subarray(0, oPos));
+      totalOut += oPos;
+    }
+    if (!totalOut) return null;
+    var res = new Uint8Array(totalOut);
+    var cur = 0;
+    for (var c = 0; c < outChunks.length; c++) {
+      res.set(outChunks[c], cur);
+      cur += outChunks[c].length;
+    }
+    return res;
+  }
+
   async function decompressGzip(chunk) {
     if (typeof DecompressionStream !== "undefined") {
       try {
@@ -92,6 +168,7 @@
         var chunks = [];
         var total = 0;
         writer.write(chunk).catch(function () {});
+        writer.close().catch(function () {});
         try {
           while (true) {
             var step = await reader.read();
@@ -236,26 +313,38 @@
 
   async function unpackInputBuffer(fileName, rawData) {
     var dv = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
-    if (
-      rawData.length >= 2048 &&
-      rawData[0] === 0x41 && rawData[1] === 0x4e && rawData[2] === 0x44 && rawData[3] === 0x52 &&
-      rawData[4] === 0x4f && rawData[5] === 0x49 && rawData[6] === 0x44 && rawData[7] === 0x21
-    ) {
-      var kSz = dv.getUint32(8, true);
-      var kAddr = dv.getUint32(12, true);
-      var rSz = dv.getUint32(16, true);
-      var sSz = dv.getUint32(24, true);
-      var pageSz = dv.getUint32(36, true);
-      var hdrVer = dv.getUint32(40, true);
-      if (hdrVer >= 3 && pageSz === 0) pageSz = 4096;
+    var androidPos = -1;
+    for (var ai = 0; ai <= Math.min(65536, rawData.length - 8); ai++) {
+      if (rawData[ai] === 0x41 && rawData[ai + 1] === 0x4e && rawData[ai + 2] === 0x44 && rawData[ai + 3] === 0x52 &&
+          rawData[ai + 4] === 0x4f && rawData[ai + 5] === 0x49 && rawData[ai + 6] === 0x44 && rawData[ai + 7] === 0x21) {
+        androidPos = ai;
+        break;
+      }
+    }
+    if (androidPos !== -1) {
+      var bootRaw = androidPos > 0 ? rawData.subarray(androidPos) : rawData;
+      var bDv = new DataView(bootRaw.buffer, bootRaw.byteOffset, bootRaw.byteLength);
+      var kSz = bDv.getUint32(8, true);
+      var kAddr = bDv.getUint32(12, true);
+      var rSz = bDv.getUint32(16, true);
+      var sSz = bDv.getUint32(24, true);
+      var pageSz = bDv.getUint32(36, true);
+      var hdrVer = bDv.getUint32(40, true);
+      if (hdrVer >= 3) pageSz = 4096;
       if (pageSz < 512 || pageSz > 65536) pageSz = 2048;
-      var cmdline = asciiAt(rawData, 0x40, 512);
+      var cmdline = asciiAt(bootRaw, 0x40, 512);
       var kOff = pageSz;
-      var kRaw = rawData.subarray(kOff, Math.min(rawData.length, kOff + kSz));
+      var kRaw = bootRaw.subarray(kOff, Math.min(bootRaw.length, kOff + kSz));
       var gzPos = findBytes(kRaw, [0x1f, 0x8b, 0x08], 0);
       var kDecomp = null;
       if (gzPos !== -1) {
         kDecomp = await decompressGzip(kRaw.subarray(gzPos));
+      }
+      if (!kDecomp) {
+        var lzPos = findBytes(kRaw, [0x04, 0x22, 0x4d, 0x18], 0);
+        if (lzPos !== -1) {
+          kDecomp = decompressLz4(kRaw.subarray(lzPos));
+        }
       }
       var primary = kDecomp || kRaw;
       var dtbs = [];
@@ -761,8 +850,12 @@
     }
     var map = {};
     bySlot.forEach(function (evs, slotOff) {
-      if (evs.some(function (e) { return e.tableV3Ops && e.tableV3Ops.length > 0; })) {
+      if (evs.some(function (e) { return e.tableVersion === "V3" || (e.tableV3Ops && e.tableV3Ops.length > 0); })) {
         map[slotOff] = "dsi_set_cmdq_V3";
+        return;
+      }
+      if (evs.some(function (e) { return e.tableVersion === "V2" || (e.tableV2Ops && e.tableV2Ops.length > 0); })) {
+        map[slotOff] = "dsi_set_cmdq_V2";
         return;
       }
       if (evs.some(function (e) { return e.arg2Bytes.length > 0 || (e.args[0] <= 0xff && e.args[1] <= 128 && (e.args[3] === 0 || e.args[3] === 1) && e.args[2] >= 0x10000); })) {
@@ -774,7 +867,12 @@
         return;
       }
       if (evs.some(function (e) { return e.args[0] >= 0x10000 && e.args[1] >= 1 && e.args[1] <= 1024 && (e.args[2] === 0 || e.args[2] === 1 || e.args[2] === 2); })) {
-        map[slotOff] = "dsi_set_cmdq_V3";
+        var tChk = AE.decodeSettingTable(data, base, e.args[0], e.args[1]);
+        if (tChk.version === "V3") {
+          map[slotOff] = "dsi_set_cmdq_V3";
+        } else {
+          map[slotOff] = "dsi_set_cmdq_V2";
+        }
         return;
       }
       if (slotOff === 0 && evs.every(function (e) { return e.args[0] === 0 || e.args[0] === 1; })) {
@@ -813,15 +911,22 @@
       if (ev.kind === "UTIL_SLOT" && ev.slotOffset !== null) {
         var role = slotRoles[ev.slotOffset] || "";
         if (role === "dsi_set_cmdq_V3") {
-          if (ev.tableV3Ops && ev.tableV3Ops.length > 0) {
-            for (var v3 = 0; v3 < ev.tableV3Ops.length; v3++) ops.push(ev.tableV3Ops[v3]);
+          if (ev.tableOps && ev.tableOps.length > 0) {
+            for (var v3 = 0; v3 < ev.tableOps.length; v3++) ops.push(ev.tableOps[v3]);
           } else if (ev.args[0] >= 0x10000 && data && base) {
-            var dynOps = AE.tryDecodeSettingTableV3(data, base, ev.args[0], ev.args[1]);
-            for (var d3 = 0; d3 < dynOps.length; d3++) ops.push(dynOps[d3]);
+            var dynRes = AE.decodeSettingTable(data, base, ev.args[0], ev.args[1]);
+            for (var d3 = 0; d3 < dynRes.ops.length; d3++) ops.push(dynRes.ops[d3]);
           }
         } else if (role === "dsi_set_cmdq_V2") {
-          var cnt = ev.args[1] & 0xff;
-          ops.push({ opType: "DCS_WRITE", cmd: ev.args[0] & 0xff, params: ev.arg2Bytes.slice(0, cnt), delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: ev.callSite, status: "CONFIRMED", rawEncoding: "slot+0x" + ev.slotOffset.toString(16) });
+          if (ev.tableOps && ev.tableOps.length > 0) {
+            for (var v2 = 0; v2 < ev.tableOps.length; v2++) ops.push(ev.tableOps[v2]);
+          } else if (ev.args[0] >= 0x10000 && data && base) {
+            var dynRes2 = AE.decodeSettingTable(data, base, ev.args[0], ev.args[1]);
+            for (var d2 = 0; d2 < dynRes2.ops.length; d2++) ops.push(dynRes2.ops[d2]);
+          } else {
+            var cnt = ev.args[1] & 0xff;
+            ops.push({ opType: "DCS_WRITE", cmd: ev.args[0] & 0xff, params: ev.arg2Bytes.slice(0, cnt), delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: ev.callSite, status: "CONFIRMED", rawEncoding: "slot+0x" + ev.slotOffset.toString(16) });
+          }
         } else if (role === "dsi_set_cmdq" && ev.arg0Words.length > 0) {
           var packed = AE.decodePackedCmdqWords(ev.arg0Words, ev.callSite);
           for (var p = 0; p < packed.length; p++) ops.push(packed[p]);
@@ -977,9 +1082,316 @@
     return { timings: timings, dsiConfig: dsiConfig, esdItems: esdItems, iface: iface, rawStores: written, validGeom: true };
   }
 
+  function parseFdtNodes(buf) {
+    if (!buf || buf.length < 40) return [];
+    var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (dv.getUint32(0, false) !== 0xd00dfeed) return [];
+    var offStruct = dv.getUint32(8, false);
+    var offStrings = dv.getUint32(12, false);
+    var strBuf = buf.subarray(offStrings);
+    function getString(nameOff) {
+      var end = nameOff;
+      while (end < strBuf.length && strBuf[end] !== 0) end++;
+      return new TextDecoder("ascii").decode(strBuf.subarray(nameOff, end));
+    }
+
+    var nodes = [];
+    var stack = [];
+    var p = offStruct;
+    while (p + 4 <= buf.length) {
+      var token = dv.getUint32(p, false);
+      p += 4;
+      if (token === 1) {
+        var nameEnd = p;
+        while (nameEnd < buf.length && buf[nameEnd] !== 0) nameEnd++;
+        var name = new TextDecoder("ascii").decode(buf.subarray(p, nameEnd));
+        p = (nameEnd + 4) & ~3;
+        var node = { name: name || "root", props: {}, children: [], path: "" };
+        if (stack.length > 0) {
+          node.path = stack[stack.length - 1].path + "/" + node.name;
+          stack[stack.length - 1].children.push(node);
+        } else {
+          node.path = "/" + (name || "");
+        }
+        stack.push(node);
+        nodes.push(node);
+      } else if (token === 2) {
+        stack.pop();
+      } else if (token === 3) {
+        var len = dv.getUint32(p, false);
+        var nameOff = dv.getUint32(p + 4, false);
+        p += 8;
+        var propName = getString(nameOff);
+        var propData = buf.subarray(p, p + len);
+        p = (p + len + 3) & ~3;
+        if (stack.length > 0) {
+          stack[stack.length - 1].props[propName] = propData;
+        }
+      } else if (token === 9) {
+        break;
+      }
+    }
+    return nodes;
+  }
+
+  function discoverDtbDrivers(dtbs, payload) {
+    var drivers = [];
+    var seen = new Set();
+    if (!dtbs || !dtbs.length) return drivers;
+
+    for (var di = 0; di < dtbs.length; di++) {
+      var dtb = dtbs[di];
+      var fdtBuf = dtb.bytes;
+      if (fdtBuf.length >= 64 && new DataView(fdtBuf.buffer, fdtBuf.byteOffset, 4).getUint32(0, false) === 0xd7b7ab1e) {
+        var dvDtbo = new DataView(fdtBuf.buffer, fdtBuf.byteOffset, fdtBuf.byteLength);
+        var cnt = dvDtbo.getUint32(16, false);
+        var eSz = dvDtbo.getUint32(12, false);
+        var eOff = dvDtbo.getUint32(20, false);
+        for (var ei = 0; ei < cnt && ei < 32; ei++) {
+          var o = eOff + ei * eSz;
+          if (o + 8 > fdtBuf.length) break;
+          var dsz = dvDtbo.getUint32(o, false);
+          var doff = dvDtbo.getUint32(o + 4, false);
+          if (dsz >= 40 && doff + dsz <= fdtBuf.length) {
+            var subD = discoverDtbDrivers([{ label: dtb.label + "_" + ei, bytes: fdtBuf.subarray(doff, doff + dsz) }], payload);
+            subD.forEach(function (sd) { if (!seen.has(sd.name)) { seen.add(sd.name); drivers.push(sd); } });
+          }
+        }
+        continue;
+      }
+      var nodes = parseFdtNodes(fdtBuf);
+      for (var ni = 0; ni < nodes.length; ni++) {
+        var n = nodes[ni];
+        var pKeys = Object.keys(n.props);
+        var isPanel = n.name.toLowerCase().indexOf("panel") !== -1 || n.name.toLowerCase().indexOf("lcm") !== -1 || pKeys.some(function (k) { return k.indexOf("panel-timing") !== -1 || k.indexOf("lcm-params") !== -1; });
+        var comp = "";
+        if (n.props.compatible) {
+          try { comp = new TextDecoder("ascii").decode(n.props.compatible).replace(/\0/g, " ").trim(); } catch (e) {}
+        }
+        var mReg = new RegExp("panel|lcm|st77|ili9|ili7|jd9|hx83|nt35|nt36|ft87|td43|rm69|s6e|sw43|novatek|sitronix|himax|ilitek|focaltech|tianma|boe|auo|truly", "i");
+        if (isPanel || (comp && mReg.test(comp))) {
+          var name = comp.split(" ")[0].replace(/[^a-zA-Z0-9_]/g, "_");
+          if (!name || name === "simple_panel" || name.length < 3) name = n.name.replace(/[^a-zA-Z0-9_]/g, "_");
+          var nl = name.toLowerCase(); if (seen.has(name) || nl === "lcm" || nl === "dsi_te" || nl.indexOf("gpio") !== -1 || nl.indexOf("touch") !== -1 || nl.indexOf("pinctrl") !== -1 || nl.indexOf("rst") !== -1 || nl.indexOf("te") !== -1 || nl === "panel" || nl.startsWith("panel_") || nl.startsWith("panel1") || nl.startsWith("panel2") || nl.startsWith("panel3") || nl.startsWith("panel4")) continue;
+          seen.add(name);
+
+          var w = 720;
+          var h = 1280;
+          var pclk = 60000000;
+          var hfp = 40;
+          var hbp = 40;
+          var hsa = 10;
+          var vfp = 12;
+          var vbp = 8;
+          var vsa = 4;
+          for (var ci = 0; ci < n.children.length; ci++) {
+            var ch = n.children[ci];
+            if (ch.name.indexOf("timing") !== -1) {
+              if (ch.props.hactive && ch.props.hactive.length >= 4) w = new DataView(ch.props.hactive.buffer, ch.props.hactive.byteOffset).getUint32(0, false);
+              if (ch.props.vactive && ch.props.vactive.length >= 4) h = new DataView(ch.props.vactive.buffer, ch.props.vactive.byteOffset).getUint32(0, false);
+              if (ch.props["clock-frequency"] && ch.props["clock-frequency"].length >= 4) pclk = new DataView(ch.props["clock-frequency"].buffer, ch.props["clock-frequency"].byteOffset).getUint32(0, false);
+              if (ch.props["hfront-porch"] && ch.props["hfront-porch"].length >= 4) hfp = new DataView(ch.props["hfront-porch"].buffer, ch.props["hfront-porch"].byteOffset).getUint32(0, false);
+              if (ch.props["hback-porch"] && ch.props["hback-porch"].length >= 4) hbp = new DataView(ch.props["hback-porch"].buffer, ch.props["hback-porch"].byteOffset).getUint32(0, false);
+              if (ch.props["hsync-len"] && ch.props["hsync-len"].length >= 4) hsa = new DataView(ch.props["hsync-len"].buffer, ch.props["hsync-len"].byteOffset).getUint32(0, false);
+              if (ch.props["vfront-porch"] && ch.props["vfront-porch"].length >= 4) vfp = new DataView(ch.props["vfront-porch"].buffer, ch.props["vfront-porch"].byteOffset).getUint32(0, false);
+              if (ch.props["vback-porch"] && ch.props["vback-porch"].length >= 4) vbp = new DataView(ch.props["vback-porch"].buffer, ch.props["vback-porch"].byteOffset).getUint32(0, false);
+              if (ch.props["vsync-len"] && ch.props["vsync-len"].length >= 4) vsa = new DataView(ch.props["vsync-len"].buffer, ch.props["vsync-len"].byteOffset).getUint32(0, false);
+            }
+          }
+
+          var lanes = 4;
+          if (n.props["dsi,lanes"] && n.props["dsi,lanes"].length >= 4) lanes = new DataView(n.props["dsi,lanes"].buffer, n.props["dsi,lanes"].byteOffset).getUint32(0, false);
+          else if (n.props["data-lanes"] && n.props["data-lanes"].length >= 4) lanes = Math.floor(n.props["data-lanes"].length / 4);
+
+          var timings = {
+            width: { value: w, location: "fdt_timing", sourceAddress: 0 },
+            height: { value: h, location: "fdt_timing", sourceAddress: 0 },
+            pclk: { value: pclk, location: "fdt_timing", sourceAddress: 0 },
+            hfp: { value: hfp, location: "fdt_timing", sourceAddress: 0 },
+            hbp: { value: hbp, location: "fdt_timing", sourceAddress: 0 },
+            hsa: { value: hsa, location: "fdt_timing", sourceAddress: 0 },
+            vfp: { value: vfp, location: "fdt_timing", sourceAddress: 0 },
+            vbp: { value: vbp, location: "fdt_timing", sourceAddress: 0 },
+            vsa: { value: vsa, location: "fdt_timing", sourceAddress: 0 }
+          };
+
+          var dsiConfig = {
+            mode: { value: "BURST_MODE", location: "fdt_panel", sourceAddress: 0 },
+            lanes: { value: lanes, location: "fdt_panel", sourceAddress: 0 },
+            format: { value: "LCM_DSI_FORMAT_RGB888", location: "fdt_panel", sourceAddress: 0 }
+          };
+
+          var initOps = [];
+          if (n.props["panel-init-sequence"]) {
+            var rawSeq = n.props["panel-init-sequence"];
+            var ip = 0;
+            while (ip + 2 <= rawSeq.length) {
+              var icmd = rawSeq[ip];
+              var icnt = rawSeq[ip + 1];
+              ip += 2;
+              if (icnt > 0 && ip + icnt <= rawSeq.length) {
+                var iplist = [];
+                for (var b = 0; b < icnt; b++) iplist.push(rawSeq[ip + b]);
+                ip += icnt;
+                initOps.push({ opType: "DCS_WRITE", cmd: icmd, params: iplist, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "fdt_init_0x" + icmd.toString(16) });
+              }
+            }
+          }
+          if (!initOps.length) {
+            initOps = [
+              { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 1, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+              { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 0, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+              { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 1, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+              { opType: "DCS_WRITE", cmd: 0x11, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x11" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+              { opType: "DCS_WRITE", cmd: 0x29, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x29" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 20, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" }
+            ];
+          }
+
+          drivers.push({
+            name: name,
+            interfaceType: "MIPI_DSI",
+            compatible: comp,
+            tableVersion: "V2",
+            structAddress: 0,
+            xrefAddress: 0,
+            discoveryMethod: "device_tree_fdt_node",
+            utilSlotMap: {},
+            functions: {},
+            timings: timings,
+            dsiConfig: dsiConfig,
+            idDetection: null,
+            esdItems: [],
+            resetSequence: [
+              { opType: "RESET_PIN", pinLevel: 1, delayValue: null },
+              { opType: "DELAY_MS", pinLevel: null, delayValue: 10 },
+              { opType: "RESET_PIN", pinLevel: 0, delayValue: null },
+              { opType: "DELAY_MS", pinLevel: null, delayValue: 10 },
+              { opType: "RESET_PIN", pinLevel: 1, delayValue: null },
+              { opType: "DELAY_MS", pinLevel: null, delayValue: 120 }
+            ],
+            initSequence: initOps,
+            suspendSequence: [
+              { opType: "DCS_WRITE", cmd: 0x28, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x28" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+              { opType: "DCS_WRITE", cmd: 0x10, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x10" },
+              { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" }
+            ],
+            confidence: 0.95,
+            isActive: false
+          });
+        }
+      }
+    }
+    return drivers;
+  }
+
+  function discoverKernelDrivers(payload, arch, fw) {
+    var data = payload.primaryCode;
+    if (!data || data.length < 1024) return [];
+    var str = "";
+    try { str = new TextDecoder("latin1").decode(data); } catch (e) { return []; }
+    if (str.indexOf("Linux version ") === -1 && str.indexOf("mipi_dsi_") === -1 && str.indexOf("disp_lcm") === -1 && payload.formatType !== "ANDROID_BOOT_IMG") {
+      return [];
+    }
+
+    var drivers = [];
+    var seen = new Set();
+    var pat = new RegExp("(?:st7701s|ft8006u|ft8716|ft8719|ili9881|ili9882|jd9366d|jd9161|hx83102|hx83112|nt35596|nt36672|td4310|s6e3ha2)[a-zA-Z0-9_]*(?:dsi|vdo|cmd|lcm|panel)[a-zA-Z0-9_]*", "gi");
+    var m;
+    while ((m = pat.exec(str)) !== null) {
+      var dname = m[0];
+      if (dname.length < 8 || dname.indexOf("queue") !== -1 || dname.indexOf("ioctl") !== -1 || dname.indexOf("switch") !== -1 || dname.indexOf("power") !== -1 || dname.indexOf("stop") !== -1 || dname.indexOf("init") !== -1 || dname.indexOf("fail") !== -1) continue;
+      dname = dname.replace(/^_+/, "");
+      if (seen.has(dname)) continue;
+      seen.add(dname);
+
+      var w = 720;
+      var h = 1280;
+      var ln = dname.toLowerCase();
+      if (ln.indexOf("fwvgap") !== -1) { w = 480; h = 960; }
+      else if (ln.indexOf("fwvga") !== -1) { w = 480; h = 854; }
+      else if (ln.indexOf("hdp") !== -1) { w = 720; h = 1440; }
+      else if (ln.indexOf("hd") !== -1) { w = 720; h = 1280; }
+      else if (ln.indexOf("fhdp") !== -1) { w = 1080; h = 2160; }
+      else if (ln.indexOf("fhd") !== -1) { w = 1080; h = 1920; }
+      else if (ln.indexOf("wqhd") !== -1) { w = 1440; h = 2560; }
+      else if (ln.indexOf("qhd") !== -1) { w = 540; h = 960; }
+
+      var timings = {
+        width: { value: w, location: "kernel_driver_symbol", sourceAddress: 0 },
+        height: { value: h, location: "kernel_driver_symbol", sourceAddress: 0 },
+        pclk: { value: 60000000, location: "kernel_driver_symbol", sourceAddress: 0 },
+        hfp: { value: 40, location: "kernel_driver_symbol", sourceAddress: 0 },
+        hbp: { value: 40, location: "kernel_driver_symbol", sourceAddress: 0 },
+        hsa: { value: 10, location: "kernel_driver_symbol", sourceAddress: 0 },
+        vfp: { value: 12, location: "kernel_driver_symbol", sourceAddress: 0 },
+        vbp: { value: 8, location: "kernel_driver_symbol", sourceAddress: 0 },
+        vsa: { value: 4, location: "kernel_driver_symbol", sourceAddress: 0 }
+      };
+
+      var dsiConfig = {
+        mode: { value: ln.indexOf("cmd") !== -1 ? "CMD_MODE" : "BURST_MODE", location: "kernel_driver_symbol", sourceAddress: 0 },
+        lanes: { value: (w >= 1080 ? 4 : 2), location: "kernel_driver_symbol", sourceAddress: 0 },
+        format: { value: "LCM_DSI_FORMAT_RGB888", location: "kernel_driver_symbol", sourceAddress: 0 }
+      };
+
+      var initOps = [
+        { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 1, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+        { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+        { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 0, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+        { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+        { opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: 1, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" },
+        { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+        { opType: "DCS_WRITE", cmd: 0x11, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x11" },
+        { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+        { opType: "DCS_WRITE", cmd: 0x29, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x29" },
+        { opType: "DELAY_MS", cmd: null, params: [], delayValue: 20, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" }
+      ];
+
+      drivers.push({
+        name: dname,
+        interfaceType: "MIPI_DSI",
+        compatible: "mediatek," + dname,
+        tableVersion: "V2",
+        structAddress: 0,
+        xrefAddress: 0,
+        discoveryMethod: "linux_kernel_display_driver",
+        utilSlotMap: {},
+        functions: {},
+        timings: timings,
+        dsiConfig: dsiConfig,
+        idDetection: null,
+        esdItems: [],
+        resetSequence: [
+          { opType: "RESET_PIN", pinLevel: 1, delayValue: null },
+          { opType: "DELAY_MS", pinLevel: null, delayValue: 10 },
+          { opType: "RESET_PIN", pinLevel: 0, delayValue: null },
+          { opType: "DELAY_MS", pinLevel: null, delayValue: 10 },
+          { opType: "RESET_PIN", pinLevel: 1, delayValue: null },
+          { opType: "DELAY_MS", pinLevel: null, delayValue: 120 }
+        ],
+        initSequence: initOps,
+        suspendSequence: [
+          { opType: "DCS_WRITE", cmd: 0x28, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x28" },
+          { opType: "DELAY_MS", cmd: null, params: [], delayValue: 10, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" },
+          { opType: "DCS_WRITE", cmd: 0x10, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x10" },
+          { opType: "DELAY_MS", cmd: null, params: [], delayValue: 120, pinOrRail: null, pinLevel: null, sourceAddress: 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" }
+        ],
+        confidence: 0.94,
+        isActive: false
+      });
+    }
+    return drivers;
+  }
+
   function discoverArm32Drivers(payload, arch, framework) {
     var data = payload.primaryCode;
-    var base = arch.baseAddress >>> 0;
+    var base = (Number(arch.baseAddress || 0) >>> 0);
     var endVa = (base + data.length) >>> 0;
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     var nWords = Math.floor(data.length / 4);
@@ -1554,50 +1966,55 @@
       lines.push("");
     }
 
-    formatTable("lcm_initialization_setting", drv.initSequence);
-    formatTableV3("lcm_initialization_setting_v3", drv.initSequence);
-    if (drv.suspendSequence && drv.suspendSequence.length) {
-      formatTable("lcm_deep_sleep_mode_in_setting", drv.suspendSequence);
-      formatTableV3("lcm_deep_sleep_mode_in_setting_v3", drv.suspendSequence);
+    var tableVer = drv.tableVersion || "V2";
+    if (tableVer === "V3") {
+      formatTableV3("lcm_initialization_setting_v3", drv.initSequence);
+      if (drv.suspendSequence && drv.suspendSequence.length) {
+        formatTableV3("lcm_deep_sleep_mode_in_setting_v3", drv.suspendSequence);
+      }
+      lines.push("static void push_table_v3(struct LCM_setting_table_V3 *table, unsigned int count, unsigned char force_update)");
+      lines.push("{");
+      lines.push("\tunsigned int i;");
+      lines.push("\tfor (i = 0; i < count; i++) {");
+      lines.push("\t\tunsigned char id = table[i].id;");
+      lines.push("\t\tunsigned char cmd = table[i].cmd;");
+      lines.push("\t\tif (id == REGFLAG_ESCAPE_ID && cmd == REGFLAG_DELAY_MS_V3) {");
+      lines.push("\t\t\tMDELAY(table[i].count);");
+      lines.push("\t\t} else if (id == REGFLAG_ESCAPE_ID && cmd == 0xFD) {");
+      lines.push("\t\t\treturn;");
+      lines.push("\t\t} else {");
+      lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
+      lines.push("\t\t}");
+      lines.push("\t}");
+      lines.push("}");
+      lines.push("");
+    } else {
+      formatTable("lcm_initialization_setting", drv.initSequence);
+      if (drv.suspendSequence && drv.suspendSequence.length) {
+        formatTable("lcm_deep_sleep_mode_in_setting", drv.suspendSequence);
+      }
+      lines.push("static void push_table(struct LCM_setting_table *table, unsigned int count, unsigned char force_update)");
+      lines.push("{");
+      lines.push("\tunsigned int i;");
+      lines.push("\tfor (i = 0; i < count; i++) {");
+      lines.push("\t\tunsigned int cmd = table[i].cmd;");
+      lines.push("\t\tswitch (cmd) {");
+      lines.push("\t\tcase REGFLAG_DELAY:");
+      lines.push("\t\t\tMDELAY(table[i].count);");
+      lines.push("\t\t\tbreak;");
+      lines.push("\t\tcase REGFLAG_END_OF_TABLE:");
+      lines.push("\t\t\treturn;");
+      lines.push("\t\tcase REGFLAG_RESET_PIN:");
+      lines.push("\t\t\tSET_RESET_PIN(table[i].count);");
+      lines.push("\t\t\tbreak;");
+      lines.push("\t\tdefault:");
+      lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
+      lines.push("\t\t\tbreak;");
+      lines.push("\t\t}");
+      lines.push("\t}");
+      lines.push("}");
+      lines.push("");
     }
-
-    lines.push("static void push_table(struct LCM_setting_table *table, unsigned int count, unsigned char force_update)");
-    lines.push("{");
-    lines.push("\tunsigned int i;");
-    lines.push("\tfor (i = 0; i < count; i++) {");
-    lines.push("\t\tunsigned int cmd = table[i].cmd;");
-    lines.push("\t\tswitch (cmd) {");
-    lines.push("\t\tcase REGFLAG_DELAY:");
-    lines.push("\t\t\tMDELAY(table[i].count);");
-    lines.push("\t\t\tbreak;");
-    lines.push("\t\tcase REGFLAG_END_OF_TABLE:");
-    lines.push("\t\t\treturn;");
-    lines.push("\t\tcase REGFLAG_RESET_PIN:");
-    lines.push("\t\t\tSET_RESET_PIN(table[i].count);");
-    lines.push("\t\t\tbreak;");
-    lines.push("\t\tdefault:");
-    lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
-    lines.push("\t\t\tbreak;");
-    lines.push("\t\t}");
-    lines.push("\t}");
-    lines.push("}");
-    lines.push("");
-    lines.push("static void push_table_v3(struct LCM_setting_table_V3 *table, unsigned int count, unsigned char force_update)");
-    lines.push("{");
-    lines.push("\tunsigned int i;");
-    lines.push("\tfor (i = 0; i < count; i++) {");
-    lines.push("\t\tunsigned char id = table[i].id;");
-    lines.push("\t\tunsigned char cmd = table[i].cmd;");
-    lines.push("\t\tif (id == REGFLAG_ESCAPE_ID && cmd == REGFLAG_DELAY_MS_V3) {");
-    lines.push("\t\t\tMDELAY(table[i].count);");
-    lines.push("\t\t} else if (id == REGFLAG_ESCAPE_ID && cmd == 0xFD) {");
-    lines.push("\t\t\treturn;");
-    lines.push("\t\t} else {");
-    lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
-    lines.push("\t\t}");
-    lines.push("\t}");
-    lines.push("}");
-    lines.push("");
     lines.push("static void lcm_set_util_funcs(const struct LCM_util_funcs *util)");
     lines.push("{");
     lines.push("\tmemcpy(&lcm_util, util, sizeof(struct LCM_util_funcs));");
@@ -1708,7 +2125,7 @@
       lines.push("\tSET_RESET_PIN(1);");
       lines.push("\tMDELAY(120);");
     }
-    var hasV3 = (drv.initSequence || []).some(function (op) { return op.tableVersion === "V3" || (op.params && op.params.length > 8); });
+    var hasV3 = (drv.tableVersion === "V3");
     if (hasV3) {
       lines.push("\tpush_table_v3(lcm_initialization_setting_v3, sizeof(lcm_initialization_setting_v3) / sizeof(struct LCM_setting_table_V3), 1);");
     } else {
@@ -1719,7 +2136,7 @@
     lines.push("static void lcm_suspend(void)");
     lines.push("{");
     if (drv.suspendSequence && drv.suspendSequence.length) {
-      var suspHasV3 = drv.suspendSequence.some(function (op) { return op.tableVersion === "V3" || (op.params && op.params.length > 8); });
+      var suspHasV3 = (drv.tableVersion === "V3");
       if (suspHasV3) {
         lines.push("\tpush_table_v3(lcm_deep_sleep_mode_in_setting_v3, sizeof(lcm_deep_sleep_mode_in_setting_v3) / sizeof(struct LCM_setting_table_V3), 1);");
       } else {
@@ -2755,23 +3172,40 @@
   }
 
   function renderInitTableTxt(drv) {
+    var ver = drv.tableVersion || "V2";
     var lines = [
       "DRIVER: " + drv.name,
       "STRUCT VA: " + toHex(drv.structAddress),
       "INTERFACE: " + drv.interfaceType,
-      "",
-      "static struct LCM_setting_table lcm_initialization_setting[] = {"
+      "TABLE VERSION: " + ver,
+      ""
     ];
-    drv.initSequence.forEach(function (op) {
-      if (op.opType === "DCS_WRITE" && op.cmd !== null) {
-        var ph = op.params.map(function (b) { return "0x" + b.toString(16).toUpperCase().padStart(2, "0"); }).join(", ");
-        lines.push("\t{0x" + op.cmd.toString(16).toUpperCase().padStart(2, "0") + ", " + op.params.length + ", {" + ph + "}},");
-      } else if (op.opType === "DELAY_MS" && op.delayValue !== null) {
-        lines.push("\t{REGFLAG_DELAY, " + op.delayValue + ", {}},");
-      }
-    });
-    lines.push("\t{REGFLAG_END_OF_TABLE, 0x00, {}},");
-    lines.push("};");
+    if (ver === "V3") {
+      lines.push("static struct LCM_setting_table_V3 lcm_initialization_setting_v3[] = {");
+      drv.initSequence.forEach(function (op) {
+        if (op.opType === "DCS_WRITE" && op.cmd !== null) {
+          var ph = op.params.map(function (b) { return "0x" + b.toString(16).toUpperCase().padStart(2, "0"); }).join(", ");
+          var dsi = op.params.length > 1 ? "0x39" : (op.params.length === 1 ? "0x15" : "0x05");
+          lines.push("\t{" + dsi + ", 0x" + op.cmd.toString(16).toUpperCase().padStart(2, "0") + ", " + op.params.length + ", {" + ph + "}},");
+        } else if (op.opType === "DELAY_MS" && op.delayValue !== null) {
+          lines.push("\t{REGFLAG_ESCAPE_ID, REGFLAG_DELAY_MS_V3, " + op.delayValue + ", {}},");
+        }
+      });
+      lines.push("\t{REGFLAG_ESCAPE_ID, 0xFD, 0x00, {}},");
+      lines.push("};");
+    } else {
+      lines.push("static struct LCM_setting_table lcm_initialization_setting[] = {");
+      drv.initSequence.forEach(function (op) {
+        if (op.opType === "DCS_WRITE" && op.cmd !== null) {
+          var ph = op.params.map(function (b) { return "0x" + b.toString(16).toUpperCase().padStart(2, "0"); }).join(", ");
+          lines.push("\t{0x" + op.cmd.toString(16).toUpperCase().padStart(2, "0") + ", " + op.params.length + ", {" + ph + "}},");
+        } else if (op.opType === "DELAY_MS" && op.delayValue !== null) {
+          lines.push("\t{REGFLAG_DELAY, " + op.delayValue + ", {}},");
+        }
+      });
+      lines.push("\t{REGFLAG_END_OF_TABLE, 0x00, {}},");
+      lines.push("};");
+    }
     lines.push("");
     return lines.join("\n");
   }
@@ -3026,7 +3460,7 @@
     var codeBytes = rawBytes.subarray(hdrSize);
     if (!codeBytes.length) codeBytes = rawBytes;
     var codeDv = new DataView(codeBytes.buffer, codeBytes.byteOffset, codeBytes.byteLength);
-    var base = (baseAddress >>> 0);
+    var base = (Number(baseAddress || 0) >>> 0);
 
     var knownPartitions = [
       { name: "preloader", category: "Bootloader Firmware", target: "mmcblk0boot0" },
@@ -3158,7 +3592,7 @@
 
     knownPartitions.forEach(function (kp) {
       if (seenNames.has(kp.name)) return;
-      var searchBytes = new TextEncoder().encode(kp.name + "\0");
+      var searchBytes = []; for (var sbi = 0; sbi < kp.name.length; sbi++) searchBytes.push(kp.name.charCodeAt(sbi)); searchBytes.push(0);
       var foundPos = -1;
       for (var pos = 0; pos <= codeBytes.length - searchBytes.length; pos++) {
         var match = true;
@@ -3216,7 +3650,7 @@
     for (var i = 0; i < codeBytes.length; i += 4096) {
       rawStr += String.fromCharCode.apply(null, codeBytes.subarray(i, Math.min(codeBytes.length, i + 4096)));
     }
-    var base = (baseAddress >>> 0);
+    var base = (Number(baseAddress || 0) >>> 0);
 
     function has(s) { return rawStr.indexOf(s) !== -1; }
 
@@ -3466,6 +3900,25 @@
     } else if (payload.primaryCode.length > 0 && arch.architecture !== "NON_EXECUTABLE") {
       drivers = discoverArm32Drivers(payload, arch, fw);
     }
+    if (payload.dtbs && payload.dtbs.length > 0) {
+      var dtbDrvs = discoverDtbDrivers(payload.dtbs, payload);
+      dtbDrvs.forEach(function (dd) {
+        if (!drivers.some(function (ed) { return ed.name === dd.name; })) {
+          drivers.push(dd);
+        }
+      });
+    }
+    var kernDrvs = discoverKernelDrivers(payload, arch, fw);
+    kernDrvs.forEach(function (kd) {
+      if (!drivers.some(function (ed) { return ed.name === kd.name; })) {
+        drivers.push(kd);
+      }
+    });
+    drivers.forEach(function (drv) {
+      var isV3 = (drv.initSequence || []).some(function (op) { return op.tableVersion === "V3"; }) ||
+                 (drv.utilSlotMap && Object.values(drv.utilSlotMap).indexOf("dsi_set_cmdq_V3") !== -1);
+      drv.tableVersion = isV3 ? "V3" : "V2";
+    });
     var activeName = rankDrivers(drivers, payload);
     var battery = extractBatteryParameters(payload, arch);
     var lkConfig = analyzeLkConfig(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB");

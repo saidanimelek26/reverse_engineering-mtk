@@ -88,7 +88,7 @@
 
     var w = drv.timings.width ? drv.timings.width.value : "?";
     var h = drv.timings.height ? drv.timings.height.value : "?";
-    driverQuickMeta.textContent = "struct=" + window.LcmEngine.toHex(drv.structAddress) + " | " + w + "x" + h + " | init_ops=" + drv.initSequence.length;
+    driverQuickMeta.textContent = "struct=" + window.LcmEngine.toHex(drv.structAddress) + " | " + w + "x" + h + " | table=" + (drv.tableVersion || "V2") + " | init_ops=" + drv.initSequence.length;
 
     fnTbody.innerHTML = "";
     Object.values(drv.functions)
@@ -346,7 +346,7 @@
       res.drivers.forEach(function (d, i) {
         var opt = document.createElement("option");
         opt.value = String(i);
-        opt.textContent = d.name + (d.isActive ? " [ACTIVE]" : "");
+        opt.textContent = d.name + " [" + (d.tableVersion || "V2") + "]" + (d.isActive ? " [ACTIVE]" : "");
         if (d.isActive) opt.selected = true;
         driverSelect.appendChild(opt);
       });
