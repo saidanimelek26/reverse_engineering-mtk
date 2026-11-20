@@ -16,6 +16,7 @@
   var sumBase = document.getElementById("sumBase");
   var sumFw = document.getElementById("sumFw");
   var sumActive = document.getElementById("sumActive");
+  var sumBat = document.getElementById("sumBat");
 
   var driverSelect = document.getElementById("driverSelect");
   var driverQuickMeta = document.getElementById("driverQuickMeta");
@@ -26,6 +27,10 @@
   var kernelPre = document.getElementById("kernelPre");
   var drmPre = document.getElementById("drmPre");
   var initPre = document.getElementById("initPre");
+  var batTable = document.querySelector("#batTable tbody");
+  var batteryDtsiPre = document.getElementById("batteryDtsiPre");
+  var batteryHdrPre = document.getElementById("batteryHdrPre");
+  var batteryRepPre = document.getElementById("batteryRepPre");
 
   var fnTbody = document.querySelector("#fnTable tbody");
   var paramTbody = document.querySelector("#paramTable tbody");
@@ -100,7 +105,62 @@
     initPre.textContent = drv.generated ? drv.generated.initTable : "";
   }
 
-  function renderFileList(outFiles) {
+  function renderBattery(res) {
+    if (!batTable) return;
+    batTable.innerHTML = "";
+    var b = res.battery;
+    if (!b || !b.discovered) {
+      if (sumBat) sumBat.textContent = "Not present in input binary (display only / LK image)";
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td colspan=\"3\">No battery or fuel gauge subsystem found in this input. Supply a kernel (boot.img, vmlinux, zImage) or DTB file to extract battery parameters.</td>";
+      batTable.appendChild(tr);
+      if (batteryDtsiPre) batteryDtsiPre.textContent = "No battery parameters discovered.";
+      if (batteryHdrPre) batteryHdrPre.textContent = "No battery parameters discovered.";
+      if (batteryRepPre) batteryRepPre.textContent = "No battery parameters discovered.";
+      return;
+    }
+
+    var desc = [];
+    if (b.capacityMah) desc.push(b.capacityMah + " mAh");
+    if (b.cvVoltageUv) desc.push((b.cvVoltageUv / 1000) + " mV CV");
+    if (b.acChargerCurrentUa) desc.push((b.acChargerCurrentUa / 1000) + " mA AC");
+    desc.push(b.source);
+    if (sumBat) sumBat.textContent = desc.join(" | ");
+
+    var items = [
+      ["Nominal Design Capacity", b.capacityMah ? (b.capacityMah + " mAh") : "N/A", "Design capacity of cell"],
+      ["Battery Chemistry / Mfr", b.manufacturer || "Standard Li-Ion", "Manufacturer or chemistry identifier"],
+      ["Model Name", b.model || "Generic Li-Ion / Polymer", "Cell model name"],
+      ["Constant Voltage Limit (CV)", b.cvVoltageUv ? ((b.cvVoltageUv / 1000) + " mV (" + (b.cvVoltageUv / 1000000).toFixed(2) + " V)") : "N/A", "Max charging termination voltage"],
+      ["Cutoff / UVLO Shutdown", b.cutoffVoltageUv ? ((b.cutoffVoltageUv / 1000) + " mV (" + (b.cutoffVoltageUv / 1000000).toFixed(2) + " V)") : "N/A", "Low battery shutdown threshold"],
+      ["AC Fast Charge Current", b.acChargerCurrentUa ? ((b.acChargerCurrentUa / 1000) + " mA") : "N/A", "Normal wall charger rate"],
+      ["AC Input Limit Current", b.acInputCurrentUa ? ((b.acInputCurrentUa / 1000) + " mA") : "N/A", "Max adapter draw limit"],
+      ["USB Standard Current", b.usbChargerCurrentUa ? ((b.usbChargerCurrentUa / 1000) + " mA") : "N/A", "Standard USB port rate"],
+      ["Pump Express / Turbo Current", b.turboChargerCurrentUa ? ((b.turboChargerCurrentUa / 1000) + " mA") : "N/A", "Fast charging / PE peak rate"],
+      ["Non-Standard Charger Current", b.nonStdChargerCurrentUa ? ((b.nonStdChargerCurrentUa / 1000) + " mA") : "N/A", "Legacy or unconfigured charger rate"],
+      ["Shunt Sense Resistor (R_FG)", b.senseResistorMohm !== null ? (b.senseResistorMohm + " mOhm") : "N/A", "Coulomb counter sense resistor"],
+      ["Meter Internal Resistance", b.meterResistanceMohm !== null ? (b.meterResistanceMohm + " mOhm") : "N/A", "Gauge meter internal resistance"],
+      ["Coulomb Counter Tune (CAR)", b.carTuneValue !== null ? String(b.carTuneValue) : "N/A", "Hardware calibration tune factor"],
+      ["Temperature Steps", b.temperatures && b.temperatures.length ? ("[" + b.temperatures.join(" C, ") + " C]") : "N/A", "Operating temperature thresholds"],
+      ["OCV-SOC Profile Curves", Object.keys(b.ocvSocProfiles || {}).length ? (Object.keys(b.ocvSocProfiles).length + " curve table(s)") : "N/A", "Multi-temperature lookup curves"]
+    ];
+
+    items.forEach(function (it) {
+      var r = document.createElement("tr");
+      r.innerHTML = "<td class=\"mono\">" + it[0] + "</td><td class=\"mono\">" + it[1] + "</td><td>" + it[2] + "</td>";
+      batTable.appendChild(r);
+    });
+
+    var fDtsi = res.outFiles.find(function (f) { return f.path.indexOf("battery_profile.dtsi") !== -1; });
+    var fHdr = res.outFiles.find(function (f) { return f.path.indexOf("cust_battery_meter.h") !== -1; });
+    var fRep = res.outFiles.find(function (f) { return f.path.indexOf("BATTERY_REPORT.md") !== -1; });
+
+    if (batteryDtsiPre) batteryDtsiPre.textContent = fDtsi ? String(fDtsi.content) : "No DTSI generated.";
+    if (batteryHdrPre) batteryHdrPre.textContent = fHdr ? String(fHdr.content) : "No C Header generated.";
+    if (batteryRepPre) batteryRepPre.textContent = fRep ? String(fRep.content) : "No report generated.";
+  }
+
+    function renderFileList(outFiles) {
     filesTbody.innerHTML = "";
     outFiles.forEach(function (f) {
       var tr = document.createElement("tr");
@@ -168,6 +228,7 @@
 
       reportPre.textContent = res.addressesReportTxt;
       renderSelectedDriver();
+      renderBattery(res);
       renderFileList(res.outFiles);
 
       summarySection.classList.remove("hidden");

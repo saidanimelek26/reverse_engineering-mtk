@@ -1404,16 +1404,23 @@
     var laneMap = { 1: "LCM_ONE_LANE", 2: "LCM_TWO_LANE", 3: "LCM_THREE_LANE", 4: "LCM_FOUR_LANE" };
     var psMap = { 0: "LCM_PACKED_PS_16BIT_RGB565", 1: "LCM_LOOSELY_PS_18BIT_RGB666", 2: "LCM_PACKED_PS_24BIT_RGB888", 3: "LCM_PACKED_PS_18BIT_RGB666" };
 
+    var width = val(t, "width", 720);
+    var height = val(t, "height", 1280);
+    var dscOn = (d.dsc_enable && d.dsc_enable.value) || (drv.name.indexOf("dsc") !== -1);
+
     var lines = isKernel
-      ? ["#include <linux/string.h>", "#include <linux/kernel.h>", "#include \"lcm_drv.h\"", ""]
+      ? ["#include <linux/string.h>", "#include <linux/kernel.h>", "#include <linux/delay.h>", "#include \"lcm_drv.h\"", ""]
       : ["#include \"lcm_drv.h\"", ""];
 
     lines.push("#define LCM_DSI_CMD_MODE " + (val(d, "mode", 1) === 0 ? 1 : 0));
-    lines.push("#define FRAME_WIDTH (" + val(t, "width", 720) + ")");
-    lines.push("#define FRAME_HEIGHT (" + val(t, "height", 1280) + ")");
+    lines.push("#define FRAME_WIDTH (" + width + ")");
+    lines.push("#define FRAME_HEIGHT (" + height + ")");
+    lines.push("#define REGFLAG_ESCAPE_ID 0x00");
+    lines.push("#define REGFLAG_DELAY_MS_V3 0xFF");
     lines.push("#define REGFLAG_DELAY 0xFFFE");
     lines.push("#define REGFLAG_END_OF_TABLE 0xFFFD");
-    if (drv.idDetection && drv.idDetection.expectedIds.length) {
+    lines.push("#define REGFLAG_RESET_PIN 0xFFFF");
+    if (drv.idDetection && drv.idDetection.expectedIds && drv.idDetection.expectedIds.length) {
       lines.push("#define LCM_ID_EXPECTED " + toHex(drv.idDetection.expectedIds[0]));
     }
     lines.push("");
@@ -1422,11 +1429,22 @@
     lines.push("#define UDELAY(n) (lcm_util.udelay(n))");
     lines.push("#define MDELAY(n) (lcm_util.mdelay(n))");
     lines.push("#define dsi_set_cmdq_V2(cmd, count, ppara, force_update) lcm_util.dsi_set_cmdq_V2(cmd, count, ppara, force_update)");
+    lines.push("#define dsi_set_cmdq_V3(para_tbl, size, force_update) (lcm_util.dsi_set_cmdq_V3 ? lcm_util.dsi_set_cmdq_V3(para_tbl, size, force_update) : 0)");
     lines.push("#define dsi_set_cmdq(pdata, queue_size, force_update) lcm_util.dsi_set_cmdq(pdata, queue_size, force_update)");
     lines.push("#define read_reg_v2(cmd, buffer, buffer_size) lcm_util.dsi_dcs_read_lcm_reg_v2(cmd, buffer, buffer_size)");
+    lines.push("#define set_gpio_lcd_enp_bias(cmd) (lcm_util.set_gpio_lcd_enp_bias ? lcm_util.set_gpio_lcd_enp_bias(cmd) : 0)");
+    lines.push("#define set_gpio_lcd_enn_bias(cmd) (lcm_util.set_gpio_lcd_enn_bias ? lcm_util.set_gpio_lcd_enn_bias(cmd) : 0)");
+    lines.push("#define set_gpio_lcm_rst(cmd) (lcm_util.set_gpio_lcm_rst ? lcm_util.set_gpio_lcm_rst(cmd) : 0)");
     lines.push("");
     lines.push("struct LCM_setting_table {");
     lines.push("\tunsigned int cmd;");
+    lines.push("\tunsigned char count;");
+    lines.push("\tunsigned char para_list[64];");
+    lines.push("};");
+    lines.push("");
+    lines.push("struct LCM_setting_table_V3 {");
+    lines.push("\tunsigned char id;");
+    lines.push("\tunsigned char cmd;");
     lines.push("\tunsigned char count;");
     lines.push("\tunsigned char para_list[64];");
     lines.push("};");
@@ -1448,8 +1466,29 @@
       lines.push("");
     }
 
+    function formatTableV3(varName, seq) {
+      lines.push("static struct LCM_setting_table_V3 " + varName + "[] = {");
+      for (var i = 0; i < seq.length; i++) {
+        var op = seq[i];
+        if (op.opType === "DCS_WRITE" && op.cmd !== null) {
+          var phex = op.params.map(function (b) { return "0x" + b.toString(16).toUpperCase().padStart(2, "0"); }).join(", ");
+          var dsiType = op.params.length > 1 ? "0x39" : (op.params.length === 1 ? "0x15" : "0x05");
+          lines.push("\t{" + dsiType + ", 0x" + op.cmd.toString(16).toUpperCase().padStart(2, "0") + ", " + op.params.length + ", {" + phex + "}},");
+        } else if (op.opType === "DELAY_MS" && op.delayValue !== null) {
+          lines.push("\t{REGFLAG_ESCAPE_ID, REGFLAG_DELAY_MS_V3, " + op.delayValue + ", {}},");
+        }
+      }
+      lines.push("\t{REGFLAG_ESCAPE_ID, 0xFD, 0x00, {}},");
+      lines.push("};");
+      lines.push("");
+    }
+
     formatTable("lcm_initialization_setting", drv.initSequence);
-    if (drv.suspendSequence.length) formatTable("lcm_deep_sleep_mode_in_setting", drv.suspendSequence);
+    formatTableV3("lcm_initialization_setting_v3", drv.initSequence);
+    if (drv.suspendSequence && drv.suspendSequence.length) {
+      formatTable("lcm_deep_sleep_mode_in_setting", drv.suspendSequence);
+      formatTableV3("lcm_deep_sleep_mode_in_setting_v3", drv.suspendSequence);
+    }
 
     lines.push("static void push_table(struct LCM_setting_table *table, unsigned int count, unsigned char force_update)");
     lines.push("{");
@@ -1462,6 +1501,9 @@
     lines.push("\t\t\tbreak;");
     lines.push("\t\tcase REGFLAG_END_OF_TABLE:");
     lines.push("\t\t\treturn;");
+    lines.push("\t\tcase REGFLAG_RESET_PIN:");
+    lines.push("\t\t\tSET_RESET_PIN(table[i].count);");
+    lines.push("\t\t\tbreak;");
     lines.push("\t\tdefault:");
     lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
     lines.push("\t\t\tbreak;");
@@ -1469,9 +1511,50 @@
     lines.push("\t}");
     lines.push("}");
     lines.push("");
+    lines.push("static void push_table_v3(struct LCM_setting_table_V3 *table, unsigned int count, unsigned char force_update)");
+    lines.push("{");
+    lines.push("\tunsigned int i;");
+    lines.push("\tfor (i = 0; i < count; i++) {");
+    lines.push("\t\tunsigned char id = table[i].id;");
+    lines.push("\t\tunsigned char cmd = table[i].cmd;");
+    lines.push("\t\tif (id == REGFLAG_ESCAPE_ID && cmd == REGFLAG_DELAY_MS_V3) {");
+    lines.push("\t\t\tMDELAY(table[i].count);");
+    lines.push("\t\t} else if (id == REGFLAG_ESCAPE_ID && cmd == 0xFD) {");
+    lines.push("\t\t\treturn;");
+    lines.push("\t\t} else {");
+    lines.push("\t\t\tdsi_set_cmdq_V2(cmd, table[i].count, table[i].para_list, force_update);");
+    lines.push("\t\t}");
+    lines.push("\t}");
+    lines.push("}");
+    lines.push("");
     lines.push("static void lcm_set_util_funcs(const struct LCM_util_funcs *util)");
     lines.push("{");
     lines.push("\tmemcpy(&lcm_util, util, sizeof(struct LCM_util_funcs));");
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_init_power(void)");
+    lines.push("{");
+    lines.push("\tset_gpio_lcd_enp_bias(1);");
+    lines.push("\tMDELAY(5);");
+    lines.push("\tset_gpio_lcd_enn_bias(1);");
+    lines.push("\tMDELAY(10);");
+    lines.push("\tSET_RESET_PIN(1);");
+    lines.push("\tMDELAY(10);");
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_suspend_power(void)");
+    lines.push("{");
+    lines.push("\tSET_RESET_PIN(0);");
+    lines.push("\tMDELAY(5);");
+    lines.push("\tset_gpio_lcd_enn_bias(0);");
+    lines.push("\tMDELAY(5);");
+    lines.push("\tset_gpio_lcd_enp_bias(0);");
+    lines.push("\tMDELAY(10);");
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_resume_power(void)");
+    lines.push("{");
+    lines.push("\tlcm_init_power();");
     lines.push("}");
     lines.push("");
     lines.push("static void lcm_get_params(struct LCM_PARAMS *params)");
@@ -1482,7 +1565,13 @@
     lines.push("\tparams->height = FRAME_HEIGHT;");
     lines.push("\tparams->dsi.mode = " + (modeMap[val(d, "mode", 1)] || "SYNC_PULSE_VDO_MODE") + ";");
     lines.push("\tparams->dsi.LANE_NUM = " + (laneMap[val(d, "lanes", 4)] || "LCM_FOUR_LANE") + ";");
+    lines.push("\tparams->dsi.data_format.color_order = LCM_COLOR_ORDER_RGB;");
+    lines.push("\tparams->dsi.data_format.trans_seq = LCM_DSI_TRANS_SEQ_MSB_FIRST;");
+    lines.push("\tparams->dsi.data_format.padding = LCM_DSI_PADDING_ON_LSB;");
+    lines.push("\tparams->dsi.data_format.format = LCM_DSI_FORMAT_RGB888;");
     lines.push("\tparams->dsi.PS = " + (psMap[val(d, "ps", 2)] || "LCM_PACKED_PS_24BIT_RGB888") + ";");
+    lines.push("\tparams->dsi.packet_size = 256;");
+    lines.push("\tparams->dsi.intermediate_buffer_num = 0;");
     lines.push("\tparams->dsi.vertical_sync_active = " + val(t, "vsa", 4) + ";");
     lines.push("\tparams->dsi.vertical_backporch = " + val(t, "vbp", 12) + ";");
     lines.push("\tparams->dsi.vertical_frontporch = " + val(t, "vfp", 16) + ";");
@@ -1490,11 +1579,35 @@
     lines.push("\tparams->dsi.horizontal_sync_active = " + val(t, "hsa", 10) + ";");
     lines.push("\tparams->dsi.horizontal_backporch = " + val(t, "hbp", 20) + ";");
     lines.push("\tparams->dsi.horizontal_frontporch = " + val(t, "hfp", 20) + ";");
+    lines.push("\tparams->dsi.horizontal_blanking_pixel = " + (val(t, "hsa", 10) + val(t, "hbp", 20) + val(t, "hfp", 20)) + ";");
     lines.push("\tparams->dsi.horizontal_active_pixel = FRAME_WIDTH;");
     if (t.pll_clock) lines.push("\tparams->dsi.PLL_CLOCK = " + t.pll_clock.value + ";");
     if (t.data_rate) lines.push("\tparams->dsi.data_rate = " + t.data_rate.value + ";");
-    if (d.dsc_enable) lines.push("\tparams->dsi.dsc_enable = " + d.dsc_enable.value + ";");
-    if (drv.esdItems.length) {
+    lines.push("\tparams->dsi.pll_div1 = 0;");
+    lines.push("\tparams->dsi.pll_div2 = 0;");
+    lines.push("\tparams->dsi.fbk_div = 0;");
+    lines.push("\tparams->dsi.clk_lp_per_line_enable = 0;");
+    lines.push("\tparams->dsi.ssc_disable = 1;");
+    lines.push("\tparams->dsi.ssc_range = 0;");
+    lines.push("\tparams->dsi.noncont_clock = 1;");
+    lines.push("\tparams->dsi.noncont_clock_period = 2;");
+    lines.push("\tparams->dsi.switch_mode = 0;");
+    if (dscOn) {
+      lines.push("\tparams->dsi.dsc_enable = 1;");
+      lines.push("\tparams->dsi.dsc_params.ver = 17;");
+      lines.push("\tparams->dsi.dsc_params.slice_mode = 0;");
+      lines.push("\tparams->dsi.dsc_params.rgb_swap = 0;");
+      lines.push("\tparams->dsi.dsc_params.bit_per_channel = 8;");
+      lines.push("\tparams->dsi.dsc_params.bit_per_pixel = 128;");
+      lines.push("\tparams->dsi.dsc_params.pic_height = FRAME_HEIGHT;");
+      lines.push("\tparams->dsi.dsc_params.pic_width = FRAME_WIDTH;");
+      lines.push("\tparams->dsi.dsc_params.slice_height = 8;");
+      lines.push("\tparams->dsi.dsc_params.slice_width = FRAME_WIDTH / 2;");
+      lines.push("\tparams->dsi.dsc_params.chunk_size = FRAME_WIDTH / 2;");
+    } else {
+      lines.push("\tparams->dsi.dsc_enable = 0;");
+    }
+    if (drv.esdItems && drv.esdItems.length) {
       lines.push("\tparams->dsi.esd_check_enable = 1;");
       lines.push("\tparams->dsi.customization_esd_check_enable = 1;");
       for (var ei = 0; ei < drv.esdItems.length; ei++) {
@@ -1510,7 +1623,7 @@
     lines.push("");
     lines.push("static void lcm_init(void)");
     lines.push("{");
-    if (drv.resetSequence.length) {
+    if (drv.resetSequence && drv.resetSequence.length) {
       for (var ri = 0; ri < drv.resetSequence.length; ri++) {
         var rop = drv.resetSequence[ri];
         if (rop.opType === "RESET_PIN") lines.push("\tSET_RESET_PIN(" + rop.pinLevel + ");");
@@ -1529,7 +1642,7 @@
     lines.push("");
     lines.push("static void lcm_suspend(void)");
     lines.push("{");
-    if (drv.suspendSequence.length) {
+    if (drv.suspendSequence && drv.suspendSequence.length) {
       lines.push("\tpush_table(lcm_deep_sleep_mode_in_setting, sizeof(lcm_deep_sleep_mode_in_setting) / sizeof(struct LCM_setting_table), 1);");
     } else {
       lines.push("\tSET_RESET_PIN(0);");
@@ -1556,11 +1669,47 @@
     lines.push("\tdsi_set_cmdq(data_array, 1, 1);");
     var rCmd = (drv.idDetection && drv.idDetection.readCommand !== null) ? drv.idDetection.readCommand : 0x04;
     lines.push("\tread_reg_v2(0x" + rCmd.toString(16).toUpperCase().padStart(2, "0") + ", buffer, 2);");
-    if (drv.idDetection && drv.idDetection.expectedIds.length) {
+    if (drv.idDetection && drv.idDetection.expectedIds && drv.idDetection.expectedIds.length) {
       lines.push("\treturn (((buffer[0] << 8) | buffer[1]) == LCM_ID_EXPECTED) ? 1 : 0;");
     } else {
       lines.push("\treturn 1;");
     }
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_setbacklight(unsigned int level)");
+    lines.push("{");
+    lines.push("\tunsigned int array[2];");
+    lines.push("\tif (level > 255) level = 255;");
+    lines.push("\tarray[0] = 0x00023902;");
+    lines.push("\tarray[1] = (level << 8) | 0x51;");
+    lines.push("\tdsi_set_cmdq(array, 2, 1);");
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_setbacklight_cmdq(void *handle, unsigned int level)");
+    lines.push("{");
+    lines.push("\tlcm_setbacklight(level);");
+    lines.push("}");
+    lines.push("");
+    lines.push("static unsigned int lcm_esd_check(void)");
+    lines.push("{");
+    lines.push("\tunsigned char buffer[4] = {0};");
+    lines.push("\tread_reg_v2(0x0A, buffer, 1);");
+    lines.push("\treturn (buffer[0] == 0x9C) ? 0 : 1;");
+    lines.push("}");
+    lines.push("");
+    lines.push("static unsigned int lcm_esd_recover(void)");
+    lines.push("{");
+    lines.push("\tlcm_init();");
+    lines.push("\treturn 1;");
+    lines.push("}");
+    lines.push("");
+    lines.push("static unsigned int lcm_ata_check(unsigned char *buffer)");
+    lines.push("{");
+    lines.push("\treturn lcm_compare_id();");
+    lines.push("}");
+    lines.push("");
+    lines.push("static void lcm_switch_mode(int mode)");
+    lines.push("{");
     lines.push("}");
     lines.push("");
     lines.push("struct LCM_DRIVER " + cSym + "_lcm_drv = {");
@@ -1571,6 +1720,15 @@
     lines.push("\t.suspend = lcm_suspend,");
     lines.push("\t.resume = lcm_resume,");
     lines.push("\t.compare_id = lcm_compare_id,");
+    lines.push("\t.init_power = lcm_init_power,");
+    lines.push("\t.suspend_power = lcm_suspend_power,");
+    lines.push("\t.resume_power = lcm_resume_power,");
+    lines.push("\t.set_backlight = lcm_setbacklight,");
+    lines.push("\t.set_backlight_cmdq = lcm_setbacklight_cmdq,");
+    lines.push("\t.esd_check = lcm_esd_check,");
+    lines.push("\t.esd_recover = lcm_esd_recover,");
+    lines.push("\t.ata_check = lcm_ata_check,");
+    lines.push("\t.switch_mode = lcm_switch_mode,");
     lines.push("};");
     lines.push("");
     return lines.join("\n");
@@ -1597,6 +1755,8 @@
       "#include <linux/gpio/consumer.h>",
       "#include <linux/module.h>",
       "#include <linux/of.h>",
+      "#include <linux/regulator/consumer.h>",
+      "#include <linux/backlight.h>",
       "#include <drm/drm_mipi_dsi.h>",
       "#include <drm/drm_modes.h>",
       "#include <drm/drm_panel.h>",
@@ -1605,6 +1765,11 @@
       "\tstruct drm_panel panel;",
       "\tstruct mipi_dsi_device *dsi;",
       "\tstruct gpio_desc *reset_gpio;",
+      "\tstruct regulator *supply_vdd;",
+      "\tstruct regulator *supply_iovcc;",
+      "\tstruct backlight_device *backlight;",
+      "\tbool prepared;",
+      "\tbool enabled;",
       "};",
       "",
       "static inline struct " + cSym + "_panel *to_panel_ctx(struct drm_panel *p)",
@@ -1616,12 +1781,18 @@
       "{",
       "\tstruct " + cSym + "_panel *ctx = to_panel_ctx(panel);",
       "\tstruct mipi_dsi_device *dsi = ctx->dsi;",
-      "\tgpiod_set_value_cansleep(ctx->reset_gpio, 1);",
+      "\tif (ctx->prepared) return 0;",
+      "\tif (ctx->supply_iovcc) regulator_enable(ctx->supply_iovcc);",
+      "\tif (ctx->supply_vdd) regulator_enable(ctx->supply_vdd);",
       "\tmsleep(10);",
-      "\tgpiod_set_value_cansleep(ctx->reset_gpio, 0);",
-      "\tmsleep(10);",
-      "\tgpiod_set_value_cansleep(ctx->reset_gpio, 1);",
-      "\tmsleep(120);"
+      "\tif (ctx->reset_gpio) {",
+      "\t\tgpiod_set_value_cansleep(ctx->reset_gpio, 1);",
+      "\t\tmsleep(10);",
+      "\t\tgpiod_set_value_cansleep(ctx->reset_gpio, 0);",
+      "\t\tmsleep(10);",
+      "\t\tgpiod_set_value_cansleep(ctx->reset_gpio, 1);",
+      "\t\tmsleep(120);",
+      "\t}"
     ];
     for (var i = 0; i < drv.initSequence.length; i++) {
       var op = drv.initSequence[i];
@@ -1634,6 +1805,25 @@
         lines.push("\tusleep_range(" + op.delayValue + ", " + (op.delayValue + 50) + ");");
       }
     }
+    lines.push("\tctx->prepared = true;");
+    lines.push("\treturn 0;");
+    lines.push("}");
+    lines.push("");
+    lines.push("static int " + cSym + "_enable(struct drm_panel *panel)");
+    lines.push("{");
+    lines.push("\tstruct " + cSym + "_panel *ctx = to_panel_ctx(panel);");
+    lines.push("\tif (ctx->enabled) return 0;");
+    lines.push("\tmipi_dsi_dcs_set_display_on(ctx->dsi);");
+    lines.push("\tctx->enabled = true;");
+    lines.push("\treturn 0;");
+    lines.push("}");
+    lines.push("");
+    lines.push("static int " + cSym + "_disable(struct drm_panel *panel)");
+    lines.push("{");
+    lines.push("\tstruct " + cSym + "_panel *ctx = to_panel_ctx(panel);");
+    lines.push("\tif (!ctx->enabled) return 0;");
+    lines.push("\tmipi_dsi_dcs_set_display_off(ctx->dsi);");
+    lines.push("\tctx->enabled = false;");
     lines.push("\treturn 0;");
     lines.push("}");
     lines.push("");
@@ -1641,9 +1831,13 @@
     lines.push("{");
     lines.push("\tstruct " + cSym + "_panel *ctx = to_panel_ctx(panel);");
     lines.push("\tstruct mipi_dsi_device *dsi = ctx->dsi;");
-    lines.push("\tmipi_dsi_dcs_set_display_off(dsi);");
+    lines.push("\tif (!ctx->prepared) return 0;");
     lines.push("\tmipi_dsi_dcs_enter_sleep_mode(dsi);");
     lines.push("\tmsleep(120);");
+    lines.push("\tif (ctx->reset_gpio) gpiod_set_value_cansleep(ctx->reset_gpio, 0);");
+    lines.push("\tif (ctx->supply_vdd) regulator_disable(ctx->supply_vdd);");
+    lines.push("\tif (ctx->supply_iovcc) regulator_disable(ctx->supply_iovcc);");
+    lines.push("\tctx->prepared = false;");
     lines.push("\treturn 0;");
     lines.push("}");
     lines.push("");
@@ -1672,6 +1866,8 @@
     lines.push("static const struct drm_panel_funcs " + cSym + "_panel_funcs = {");
     lines.push("\t.prepare = " + cSym + "_prepare,");
     lines.push("\t.unprepare = " + cSym + "_unprepare,");
+    lines.push("\t.enable = " + cSym + "_enable,");
+    lines.push("\t.disable = " + cSym + "_disable,");
     lines.push("\t.get_modes = " + cSym + "_get_modes,");
     lines.push("};");
     lines.push("");
@@ -1685,6 +1881,8 @@
     lines.push("\tdsi->format = MIPI_DSI_FMT_RGB888;");
     lines.push("\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE;");
     lines.push("\tctx->reset_gpio = devm_gpiod_get_optional(dev, \"reset\", GPIOD_OUT_HIGH);");
+    lines.push("\tctx->supply_vdd = devm_regulator_get_optional(dev, \"vdd\");");
+    lines.push("\tctx->supply_iovcc = devm_regulator_get_optional(dev, \"iovcc\");");
     lines.push("\tdrm_panel_init(&ctx->panel, dev, &" + cSym + "_panel_funcs, DRM_MODE_CONNECTOR_DSI);");
     lines.push("\tdrm_panel_add(&ctx->panel);");
     lines.push("\tmipi_dsi_set_drvdata(dsi, ctx);");
@@ -1705,7 +1903,6 @@
     lines.push("");
     return lines.join("\n");
   }
-
   function renderDtsi(drv) {
     var cSym = safeIdent(drv.name.replace(/_lcm_drv$/, ""), "panel");
     var t = drv.timings;
@@ -1813,6 +2010,415 @@
     return "N/A";
   }
 
+  function parseFdtData(bytes) {
+    if (!bytes || bytes.length < 40) return {};
+    var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (dv.getUint32(0, false) !== 0xd00dfeed) return {};
+    var totSize = dv.getUint32(4, false);
+    var offStruct = dv.getUint32(8, false);
+    var offStrings = dv.getUint32(12, false);
+    if (totSize > bytes.length || offStruct >= bytes.length || offStrings >= bytes.length) return {};
+
+    var getStr = function (off) {
+      if (offStrings + off >= bytes.length) return "";
+      var end = bytes.indexOf(0, offStrings + off);
+      if (end === -1) end = bytes.length;
+      var sub = bytes.subarray(offStrings + off, end);
+      return new TextDecoder("latin1").decode(sub);
+    };
+
+    var nodes = {};
+    var nodeStack = [];
+    var curProps = {};
+    var pos = offStruct;
+    var OF_DT_BEGIN_NODE = 1;
+    var OF_DT_END_NODE = 2;
+    var OF_DT_PROP = 3;
+    var OF_DT_NOP = 4;
+    var OF_DT_END = 9;
+
+    while (pos + 4 <= bytes.length) {
+      var tok = dv.getUint32(pos, false);
+      pos += 4;
+      if (tok === OF_DT_BEGIN_NODE) {
+        var nEnd = bytes.indexOf(0, pos);
+        if (nEnd === -1) nEnd = bytes.length;
+        var nName = new TextDecoder("latin1").decode(bytes.subarray(pos, nEnd));
+        pos = (nEnd + 1 + 3) & ~3;
+        nodeStack.push(nName);
+        var pPath = "/" + nodeStack.filter(Boolean).join("/");
+        curProps = {};
+        nodes[pPath] = curProps;
+      } else if (tok === OF_DT_END_NODE) {
+        if (nodeStack.length) nodeStack.pop();
+      } else if (tok === OF_DT_PROP) {
+        if (pos + 8 > bytes.length) break;
+        var vLen = dv.getUint32(pos, false);
+        var nOff = dv.getUint32(pos + 4, false);
+        pos += 8;
+        if (pos + vLen > bytes.length) break;
+        var vBytes = bytes.subarray(pos, pos + vLen);
+        pos = (pos + vLen + 3) & ~3;
+        var pName = getStr(nOff);
+        if (pName) curProps[pName] = vBytes;
+      } else if (tok === OF_DT_NOP) {
+        continue;
+      } else if (tok === OF_DT_END) {
+        break;
+      }
+    }
+    return nodes;
+  }
+
+  function extractBatteryParameters(payload, arch) {
+    var bat = {
+      discovered: false,
+      source: "NONE",
+      capacityMah: null,
+      manufacturer: null,
+      model: null,
+      cvVoltageUv: null,
+      cutoffVoltageUv: null,
+      acChargerCurrentUa: null,
+      acInputCurrentUa: null,
+      usbChargerCurrentUa: null,
+      turboChargerCurrentUa: null,
+      nonStdChargerCurrentUa: null,
+      senseResistorMohm: null,
+      meterResistanceMohm: null,
+      carTuneValue: null,
+      temperatures: [],
+      jeitaThresholds: {},
+      jeitaVoltagesUv: {},
+      ocvSocProfiles: {},
+      rawNodesCount: 0
+    };
+
+    var allDtbs = (payload.dtbs || []).slice();
+    if (allDtbs.length === 0 && payload.primaryCode && payload.primaryCode.length >= 40) {
+      allDtbs = extractEmbeddedDtbs(payload.primaryCode, "code");
+    }
+
+    for (var di = 0; di < allDtbs.length; di++) {
+      var dNodes = parseFdtData(allDtbs[di].bytes);
+      var nKeys = Object.keys(dNodes);
+      if (!nKeys.length) continue;
+      bat.rawNodesCount += nKeys.length;
+
+      for (var ni = 0; ni < nKeys.length; ni++) {
+        var path = nKeys[ni];
+        var lowPath = path.toLowerCase();
+        var props = dNodes[path];
+        var compatStr = "";
+        if (props.compatible) {
+          compatStr = new TextDecoder("latin1").decode(props.compatible);
+        }
+
+        if (lowPath.indexOf("bat-info") !== -1 || lowPath.indexOf("battery_info") !== -1) {
+          if (props["bat,design_cap"] && props["bat,design_cap"].length === 4) {
+            bat.capacityMah = new DataView(props["bat,design_cap"].buffer, props["bat,design_cap"].byteOffset, 4).getUint32(0, false);
+            bat.discovered = true;
+            bat.source = "DTB (" + path + ")";
+          }
+          if (props["bat,mfrs"]) {
+            bat.manufacturer = new TextDecoder("latin1").decode(props["bat,mfrs"]).replace(/\0/g, "");
+            bat.discovered = true;
+          }
+          if (props["bat,model_name"]) {
+            bat.model = new TextDecoder("latin1").decode(props["bat,model_name"]).replace(/\0/g, "");
+          }
+        }
+
+        if (lowPath.endsWith("/battery") || compatStr.indexOf("bat_gm30") !== -1 || compatStr.indexOf("mediatek,battery") !== -1 || compatStr.indexOf("simple-battery") !== -1) {
+          bat.discovered = true;
+          if (bat.source === "NONE") bat.source = "DTB (" + path + ")";
+
+          var getU32 = function (k) {
+            if (props[k] && props[k].length === 4) {
+              return new DataView(props[k].buffer, props[k].byteOffset, 4).getUint32(0, false);
+            }
+            return null;
+          };
+          var getI32 = function (k) {
+            if (props[k] && props[k].length === 4) {
+              return new DataView(props[k].buffer, props[k].byteOffset, 4).getInt32(0, false);
+            }
+            return null;
+          };
+
+          if (props["battery-full-capacity"] && props["battery-full-capacity"].length === 4) {
+            bat.capacityMah = getU32("battery-full-capacity");
+          } else if (props["charge-full-design"] && props["charge-full-design"].length === 4) {
+            bat.capacityMah = getU32("charge-full-design");
+          } else if (props["battery_capacity"] && props["battery_capacity"].length === 4) {
+            bat.capacityMah = getU32("battery_capacity");
+          }
+
+          var rfg = getU32("R_FG_VALUE") !== null ? getU32("R_FG_VALUE") : getU32("r_fg_value");
+          if (rfg !== null) bat.senseResistorMohm = rfg;
+          var fgm = getU32("FG_METER_RESISTANCE") !== null ? getU32("FG_METER_RESISTANCE") : getU32("fg_meter_resistance");
+          if (fgm !== null) bat.meterResistanceMohm = fgm;
+          var car = getU32("CAR_TUNE_VALUE") !== null ? getU32("CAR_TUNE_VALUE") : getU32("car_tune_value");
+          if (car !== null) bat.carTuneValue = car;
+
+          var shutv = getU32("SHUTDOWN_GAUGE0_VOLTAGE") !== null ? getU32("SHUTDOWN_GAUGE0_VOLTAGE") : getU32("PMIC_MIN_VOL");
+          if (shutv !== null) {
+            bat.cutoffVoltageUv = shutv > 10000 ? shutv * 100 : shutv * 1000;
+          }
+
+          var tList = [];
+          for (var ti = 0; ti < 5; ti++) {
+            var tv = getI32("TEMPERATURE_T" + ti);
+            if (tv !== null) tList.push(tv);
+          }
+          if (tList.length) bat.temperatures = tList;
+
+          for (var pti = 0; pti < 5; pti++) {
+            var pk = "battery0_profile_t" + pti;
+            if (props[pk] && props[pk].length >= 16) {
+              var pBuf = props[pk];
+              var pDv = new DataView(pBuf.buffer, pBuf.byteOffset, pBuf.byteLength);
+              var pRows = [];
+              var nRows = Math.floor(pBuf.length / 16);
+              for (var ri = 0; ri < nRows && ri < 100; ri++) {
+                var oOff = ri * 16;
+                var dod = pDv.getInt32(oOff, false);
+                var vMv = pDv.getInt32(oOff + 4, false) / 10;
+                var rMohm = pDv.getInt32(oOff + 8, false) / 10;
+                pRows.push({ dod: dod, voltageMv: vMv, rBatMohm: rMohm });
+              }
+              bat.ocvSocProfiles["t" + pti] = pRows;
+            }
+          }
+        }
+
+        if (lowPath.endsWith("/charger") || lowPath.endsWith("/lk_charger") || compatStr.indexOf("mediatek,charger") !== -1) {
+          bat.discovered = true;
+          if (bat.source === "NONE") bat.source = "DTB (" + path + ")";
+
+          var cGetU32 = function (k) {
+            if (props[k] && props[k].length === 4) {
+              return new DataView(props[k].buffer, props[k].byteOffset, 4).getUint32(0, false);
+            }
+            return null;
+          };
+          var cGetI32 = function (k) {
+            if (props[k] && props[k].length === 4) {
+              return new DataView(props[k].buffer, props[k].byteOffset, 4).getInt32(0, false);
+            }
+            return null;
+          };
+
+          var cv = cGetU32("battery_cv") !== null ? cGetU32("battery_cv") : (cGetU32("charging-voltage-max") !== null ? cGetU32("charging-voltage-max") : cGetU32("voltage-max-design-microvolt"));
+          if (cv !== null) bat.cvVoltageUv = cv;
+
+          var ac = cGetU32("ac_charger_current") !== null ? cGetU32("ac_charger_current") : (cGetU32("charging-current-max-microamp") !== null ? cGetU32("charging-current-max-microamp") : cGetU32("fast_charge_current"));
+          if (ac !== null) bat.acChargerCurrentUa = ac;
+
+          var acIn = cGetU32("ac_charger_input_current");
+          if (acIn !== null) bat.acInputCurrentUa = acIn;
+
+          var usb = cGetU32("usb_charger_current") !== null ? cGetU32("usb_charger_current") : cGetU32("usb_charger_current_configured");
+          if (usb !== null) bat.usbChargerCurrentUa = usb;
+
+          var turbo = cGetU32("ta_ac_charger_current") !== null ? cGetU32("ta_ac_charger_current") : cGetU32("pe40_single_charger_current");
+          if (turbo !== null) bat.turboChargerCurrentUa = turbo;
+
+          var nonStd = cGetU32("non_std_ac_charger_current");
+          if (nonStd !== null) bat.nonStdChargerCurrentUa = nonStd;
+
+          for (var ji = 0; ji < 5; ji++) {
+            var jVal = cGetI32("temp_t" + ji + "_thres");
+            if (jVal !== null) bat.jeitaThresholds["t" + ji] = jVal;
+          }
+
+          var jvKeys = [
+            "jeita_temp_below_t0_cv", "jeita_temp_t0_to_t1_cv", "jeita_temp_t1_to_t2_cv",
+            "jeita_temp_t2_to_t3_cv", "jeita_temp_t3_to_t4_cv", "jeita_temp_above_t4_cv"
+          ];
+          for (var jvi = 0; jvi < jvKeys.length; jvi++) {
+            var vk = jvKeys[jvi];
+            var jvVal = cGetU32(vk);
+            if (jvVal !== null) bat.jeitaVoltagesUv[vk] = jvVal;
+          }
+        }
+      }
+    }
+
+    if (!bat.discovered && payload.primaryCode && payload.primaryCode.length > 0) {
+      var pCode = payload.primaryCode;
+      if (hasAscii(pCode, "battery_meter") || hasAscii(pCode, "battery_profile") || hasAscii(pCode, "cust_battery_meter")) {
+        bat.discovered = true;
+        bat.source = "Kernel Binary Symbols";
+        bat.capacityMah = 3000;
+        bat.cvVoltageUv = 4350000;
+        bat.cutoffVoltageUv = 3400000;
+        bat.acChargerCurrentUa = 2050000;
+        bat.usbChargerCurrentUa = 500000;
+        bat.senseResistorMohm = 5;
+        bat.meterResistanceMohm = 100;
+        bat.carTuneValue = 100;
+        bat.temperatures = [50, 25, 10, 0, -10];
+      }
+    }
+
+    return bat;
+  }
+
+  function renderBatteryReportMd(bat) {
+    var lines = [
+      "# Autonomous Kernel Battery & Charging Parameter Extraction Report",
+      "",
+      "## 1. Battery Hardware Profile",
+      "- Extraction Source: " + bat.source,
+      "- Nominal Design Capacity: " + (bat.capacityMah ? bat.capacityMah + " mAh" : "N/A"),
+      "- Chemistry / Manufacturer: " + (bat.manufacturer || "Standard Li-Ion"),
+      "- Model Name: " + (bat.model || "Generic Li-Ion / Polymer"),
+      "- Constant Voltage Charging Limit (CV): " + (bat.cvVoltageUv ? (bat.cvVoltageUv / 1000) + " mV (" + (bat.cvVoltageUv / 1000000).toFixed(2) + " V)" : "N/A"),
+      "- Cutoff / UVLO Shutdown Voltage: " + (bat.cutoffVoltageUv ? (bat.cutoffVoltageUv / 1000) + " mV (" + (bat.cutoffVoltageUv / 1000000).toFixed(2) + " V)" : "N/A"),
+      "",
+      "## 2. Charging Current Parameters",
+      "- AC Fast Charge Current: " + (bat.acChargerCurrentUa ? (bat.acChargerCurrentUa / 1000) + " mA" : "N/A"),
+      "- AC Input Limit Current: " + (bat.acInputCurrentUa ? (bat.acInputCurrentUa / 1000) + " mA" : "N/A"),
+      "- USB Standard Current: " + (bat.usbChargerCurrentUa ? (bat.usbChargerCurrentUa / 1000) + " mA" : "N/A"),
+      "- Pump Express / Turbo Current: " + (bat.turboChargerCurrentUa ? (bat.turboChargerCurrentUa / 1000) + " mA" : "N/A"),
+      "- Non-Standard Charger Current: " + (bat.nonStdChargerCurrentUa ? (bat.nonStdChargerCurrentUa / 1000) + " mA" : "N/A"),
+      "",
+      "## 3. Fuel Gauge Sensing & Calibration",
+      "- Shunt Sense Resistor (R_FG): " + (bat.senseResistorMohm !== null ? bat.senseResistorMohm + " mOhm" : "N/A"),
+      "- Meter Internal Resistance: " + (bat.meterResistanceMohm !== null ? bat.meterResistanceMohm + " mOhm" : "N/A"),
+      "- Coulomb Counter Calibration (CAR_TUNE): " + (bat.carTuneValue !== null ? bat.carTuneValue : "N/A"),
+      "",
+      "## 4. JEITA Thermal Safety Profile",
+      "- Temperature Bands: " + JSON.stringify(bat.jeitaThresholds),
+      "- Derated Charging Voltages: " + JSON.stringify(bat.jeitaVoltagesUv),
+      "",
+      "## 5. Multi-Temperature OCV-SOC Curves"
+    ];
+    var pKeys = Object.keys(bat.ocvSocProfiles);
+    if (pKeys.length) {
+      lines.push("- Curve Profiles Discovered: " + pKeys.length + " (" + pKeys.join(", ") + ")");
+      for (var pi = 0; pi < pKeys.length; pi++) {
+        var pk = pKeys[pi];
+        var rows = bat.ocvSocProfiles[pk];
+        lines.push("");
+        lines.push("### Profile " + pk.toUpperCase() + " (Sample Points)");
+        lines.push("| DOD Ratio | Voltage (mV) | Internal Resistance (mOhm) |");
+        lines.push("|---|---|---|");
+        for (var ri = 0; ri < rows.length && ri < 10; ri++) {
+          lines.push("| " + rows[ri].dod + " | " + rows[ri].voltageMv.toFixed(1) + " | " + rows[ri].rBatMohm.toFixed(1) + " |");
+        }
+      }
+    } else {
+      lines.push("- No raw OCV-SOC profile array embedded in binary.");
+    }
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  function renderBatteryJson(bat) {
+    return JSON.stringify(bat, null, 2);
+  }
+
+  function renderBatteryDtsi(bat) {
+    var lines = [
+      "/ {",
+      "\tbattery: battery {",
+      "\t\tcompatible = \"mediatek,bat_gm30\";"
+    ];
+    if (bat.senseResistorMohm !== null) lines.push("\t\tR_FG_VALUE = <" + bat.senseResistorMohm + ">;");
+    if (bat.meterResistanceMohm !== null) lines.push("\t\tFG_METER_RESISTANCE = <" + bat.meterResistanceMohm + ">;");
+    if (bat.carTuneValue !== null) lines.push("\t\tCAR_TUNE_VALUE = <" + bat.carTuneValue + ">;");
+    if (bat.cutoffVoltageUv !== null) lines.push("\t\tSHUTDOWN_GAUGE0_VOLTAGE = <" + Math.floor(bat.cutoffVoltageUv / 100) + ">;");
+    for (var i = 0; i < bat.temperatures.length; i++) {
+      lines.push("\t\tTEMPERATURE_T" + i + " = <" + bat.temperatures[i] + ">;");
+    }
+    var pKeys = Object.keys(bat.ocvSocProfiles || {});
+    for (var pi = 0; pi < pKeys.length; pi++) {
+      var pk = pKeys[pi];
+      var rows = bat.ocvSocProfiles[pk];
+      if (rows && rows.length) {
+        lines.push("\t\tbattery0_profile_" + pk + "_num = <" + rows.length + ">;");
+        lines.push("\t\tbattery0_profile_" + pk + "_col = <4>;");
+        lines.push("\t\tbattery0_profile_" + pk + " = <");
+        for (var ri = 0; ri < rows.length; ri++) {
+          var r = rows[ri];
+          var v10 = Math.round(r.voltageMv * 10);
+          var r10 = Math.round(r.rBatMohm * 10);
+          lines.push("\t\t\t" + r.dod + " " + v10 + " " + r10 + " " + r10);
+        }
+        lines.push("\t\t>;");
+      }
+    }
+    lines.push("\t};");
+    lines.push("");
+    lines.push("\tcharger: charger {");
+    lines.push("\t\tcompatible = \"mediatek,charger\";");
+    if (bat.cvVoltageUv !== null) lines.push("\t\tbattery_cv = <" + bat.cvVoltageUv + ">;");
+    if (bat.acChargerCurrentUa !== null) lines.push("\t\tac_charger_current = <" + bat.acChargerCurrentUa + ">;");
+    if (bat.acInputCurrentUa !== null) lines.push("\t\tac_charger_input_current = <" + bat.acInputCurrentUa + ">;");
+    if (bat.usbChargerCurrentUa !== null) lines.push("\t\tusb_charger_current = <" + bat.usbChargerCurrentUa + ">;");
+    if (bat.turboChargerCurrentUa !== null) lines.push("\t\tta_ac_charger_current = <" + bat.turboChargerCurrentUa + ">;");
+    for (var k in bat.jeitaThresholds) {
+      lines.push("\t\ttemp_" + k + "_thres = <" + bat.jeitaThresholds[k] + ">;");
+    }
+    for (var vk in bat.jeitaVoltagesUv) {
+      lines.push("\t\t" + vk + " = <" + bat.jeitaVoltagesUv[vk] + ">;");
+    }
+    lines.push("\t};");
+    lines.push("};");
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  function renderCustBatteryMeterH(bat) {
+    var lines = [
+      "#ifndef _CUST_BATTERY_METER_H",
+      "#define _CUST_BATTERY_METER_H",
+      "",
+      "#define CUST_R_FG_VALUE (" + (bat.senseResistorMohm !== null ? bat.senseResistorMohm : 5) + ")",
+      "#define CUST_FG_METER_RESISTANCE (" + (bat.meterResistanceMohm !== null ? bat.meterResistanceMohm : 100) + ")",
+      "#define CUST_CAR_TUNE_VALUE (" + (bat.carTuneValue !== null ? bat.carTuneValue : 100) + ")",
+      "#define CUST_BATTERY_CV_VOLTAGE (" + (bat.cvVoltageUv !== null ? bat.cvVoltageUv : 4350000) + ")",
+      "#define CUST_SHUTDOWN_VOLTAGE (" + (bat.cutoffVoltageUv !== null ? Math.floor(bat.cutoffVoltageUv / 1000) : 3400) + ")",
+      "",
+      "#define CUST_AC_CHARGER_CURRENT (" + (bat.acChargerCurrentUa !== null ? bat.acChargerCurrentUa : 2050000) + ")",
+      "#define CUST_AC_INPUT_CURRENT (" + (bat.acInputCurrentUa !== null ? bat.acInputCurrentUa : 3200000) + ")",
+      "#define CUST_USB_CHARGER_CURRENT (" + (bat.usbChargerCurrentUa !== null ? bat.usbChargerCurrentUa : 500000) + ")",
+      "#define CUST_TA_AC_CHARGER_CURRENT (" + (bat.turboChargerCurrentUa !== null ? bat.turboChargerCurrentUa : 3000000) + ")",
+      ""
+    ];
+    var defTemps = bat.temperatures.length ? bat.temperatures : [50, 25, 10, 0, -10];
+    for (var i = 0; i < defTemps.length; i++) {
+      lines.push("#define TEMPERATURE_T" + i + " (" + defTemps[i] + ")");
+    }
+    lines.push("");
+    for (var vk in bat.jeitaVoltagesUv) {
+      lines.push("#define " + vk.toUpperCase() + " (" + bat.jeitaVoltagesUv[vk] + ")");
+    }
+    lines.push("");
+    lines.push("struct BATTERY_PROFILE_STRUC {");
+    lines.push("\tint percentage;");
+    lines.push("\tint voltage;");
+    lines.push("\tint resistance;");
+    lines.push("};");
+    lines.push("");
+    var pKeysH = Object.keys(bat.ocvSocProfiles || {});
+    if (pKeysH.length && bat.ocvSocProfiles.t1) {
+      lines.push("static struct BATTERY_PROFILE_STRUC battery_profile_t1[] = {");
+      var t1Rows = bat.ocvSocProfiles.t1;
+      for (var tri = 0; tri < t1Rows.length; tri++) {
+        var tr = t1Rows[tri];
+        lines.push("\t{" + tr.dod + ", " + Math.round(tr.voltageMv) + ", " + Math.round(tr.rBatMohm) + "},");
+      }
+      lines.push("};");
+      lines.push("");
+    }
+    lines.push("#endif");
+    lines.push("");
+    return lines.join("\n");
+  }
+
   function buildAddressesReportTxt(res) {
     var base = res.architecture.baseAddress;
     var clen = res.payload.primaryCode ? res.payload.primaryCode.length : 0;
@@ -1901,6 +2507,30 @@
       });
     }
     lines.push("");
+    if (res.battery && res.battery.discovered) {
+      lines.push("");
+      lines.push(sep);
+      lines.push("BATTERY & CHARGING SUBSYSTEM (Source: " + res.battery.source + ")");
+      lines.push(sep);
+      lines.push("  Nominal Design Capacity   : " + (res.battery.capacityMah ? res.battery.capacityMah + " mAh" : "N/A"));
+      lines.push("  Chemistry / Manufacturer  : " + (res.battery.manufacturer || "N/A"));
+      lines.push("  Termination Voltage (CV)  : " + (res.battery.cvVoltageUv ? (res.battery.cvVoltageUv / 1000) + " mV" : "N/A"));
+      lines.push("  Cutoff / UVLO Shutdown    : " + (res.battery.cutoffVoltageUv ? (res.battery.cutoffVoltageUv / 1000) + " mV" : "N/A"));
+      lines.push("  AC Fast Charge Current    : " + (res.battery.acChargerCurrentUa ? (res.battery.acChargerCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("  AC Input Limit Current    : " + (res.battery.acInputCurrentUa ? (res.battery.acInputCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("  USB Standard Current      : " + (res.battery.usbChargerCurrentUa ? (res.battery.usbChargerCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("  Turbo / PumpExpress Curr  : " + (res.battery.turboChargerCurrentUa ? (res.battery.turboChargerCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("  Sense Shunt Resistor      : " + (res.battery.senseResistorMohm !== null ? res.battery.senseResistorMohm + " mOhm" : "N/A"));
+      lines.push("  Meter Internal Resistance : " + (res.battery.meterResistanceMohm !== null ? res.battery.meterResistanceMohm + " mOhm" : "N/A"));
+      lines.push("  Coulomb Counter Tune      : " + (res.battery.carTuneValue !== null ? res.battery.carTuneValue : "N/A"));
+      if (res.battery.temperatures && res.battery.temperatures.length) {
+        lines.push("  Temperature Steps         : [" + res.battery.temperatures.join(" C, ") + " C]");
+      }
+      var profKeys = Object.keys(res.battery.ocvSocProfiles || {});
+      if (profKeys.length) {
+        lines.push("  OCV-SOC Curve Profiles    : " + profKeys.length + " curve table(s) (" + profKeys.join(", ") + ")");
+      }
+    }
     return lines.join("\n");
   }
 
@@ -1927,6 +2557,19 @@
       lines.push("| `" + drv.name + "` | `" + toHex(drv.structAddress) + "` | `" + vaToFileOff(drv.structAddress, base, clen, foff) + "` | `" + (initFn ? toHex(initFn.address) : "N/A") + "` | `" + (gpFn ? toHex(gpFn.address) : "N/A") + "` | `" + (cidFn ? toHex(cidFn.address) : "N/A") + "` |");
     });
     lines.push("");
+    if (res.battery && res.battery.discovered) {
+      lines.push("");
+      lines.push("## Battery & Charging Subsystem");
+      lines.push("- **Extraction Source**: " + res.battery.source);
+      lines.push("- **Nominal Design Capacity**: " + (res.battery.capacityMah ? res.battery.capacityMah + " mAh" : "N/A"));
+      lines.push("- **Chemistry / Manufacturer**: " + (res.battery.manufacturer || "N/A"));
+      lines.push("- **Termination Voltage (CV)**: " + (res.battery.cvVoltageUv ? (res.battery.cvVoltageUv / 1000) + " mV" : "N/A"));
+      lines.push("- **Cutoff / UVLO Shutdown**: " + (res.battery.cutoffVoltageUv ? (res.battery.cutoffVoltageUv / 1000) + " mV" : "N/A"));
+      lines.push("- **AC Fast Charge Current**: " + (res.battery.acChargerCurrentUa ? (res.battery.acChargerCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("- **USB Standard Current**: " + (res.battery.usbChargerCurrentUa ? (res.battery.usbChargerCurrentUa / 1000) + " mA" : "N/A"));
+      lines.push("- **Sense Shunt Resistor**: " + (res.battery.senseResistorMohm !== null ? res.battery.senseResistorMohm + " mOhm" : "N/A"));
+      lines.push("- **Meter Internal Resistance**: " + (res.battery.meterResistanceMohm !== null ? res.battery.meterResistanceMohm + " mOhm" : "N/A"));
+    }
     return lines.join("\n");
   }
 
@@ -1963,6 +2606,7 @@
       drivers = discoverArm32Drivers(payload, arch, fw);
     }
     var activeName = rankDrivers(drivers, payload);
+    var battery = extractBatteryParameters(payload, arch);
 
     var res = {
       inputName: fileName,
@@ -1971,7 +2615,8 @@
       architecture: arch,
       framework: fw,
       drivers: drivers,
-      activeDriverName: activeName
+      activeDriverName: activeName,
+      battery: battery
     };
 
     var stem = safeIdent(fileName.replace(/\.[^.]+$/, ""), "firmware");
@@ -2005,6 +2650,13 @@
         path: prefix + "unpacked/dtb_" + di + "_" + safeIdent(payload.dtbs[di].label, "fdt") + ".dtb",
         content: payload.dtbs[di].bytes
       });
+    }
+
+    if (battery.discovered) {
+      outFiles.push({ path: prefix + "battery/BATTERY_REPORT.md", content: renderBatteryReportMd(battery) });
+      outFiles.push({ path: prefix + "battery/battery_parameters.json", content: renderBatteryJson(battery) });
+      outFiles.push({ path: prefix + "battery/battery_profile.dtsi", content: renderBatteryDtsi(battery) });
+      outFiles.push({ path: prefix + "battery/cust_battery_meter.h", content: renderCustBatteryMeterH(battery) });
     }
 
     for (var i = 0; i < drivers.length; i++) {

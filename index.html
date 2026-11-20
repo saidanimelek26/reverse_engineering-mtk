@@ -28,6 +28,7 @@
           <tr><th>Input</th><td id="sumFile">-</td><th>Format</th><td id="sumFormat">-</td></tr>
           <tr><th>Architecture</th><td id="sumArch">-</td><th>Load Base VA</th><td id="sumBase" class="mono">-</td></tr>
           <tr><th>Framework</th><td id="sumFw">-</td><th>Active Driver</th><td id="sumActive" class="mono">-</td></tr>
+          <tr><th>Battery &amp; Charging</th><td id="sumBat" colspan="3" class="mono">-</td></tr>
         </tbody>
       </table>
       <div class="driver-row">
@@ -45,6 +46,7 @@
         <button type="button" class="tab" data-tab="kernel">Kernel MTK (.c)</button>
         <button type="button" class="tab" data-tab="drm">DRM Panel (.c + .dtsi)</button>
         <button type="button" class="tab" data-tab="init">Init Table (.txt)</button>
+        <button type="button" class="tab" data-tab="battery">Battery &amp; Charging</button>
         <button type="button" class="tab" data-tab="files">out/ Files</button>
       </div>
 
@@ -83,6 +85,25 @@
       <div id="tab-init" class="tab-pane hidden">
         <div class="pane-actions"><button type="button" class="copy-btn" data-copy="initPre">Copy Table</button></div>
         <pre id="initPre" class="code"></pre>
+      </div>
+
+      <div id="tab-battery" class="tab-pane hidden">
+        <div class="pane-actions">
+          <button type="button" class="copy-btn" data-copy="batteryDtsiPre">Copy DTSI</button>
+          <button type="button" class="copy-btn" data-copy="batteryHdrPre">Copy C Header</button>
+          <button type="button" class="copy-btn" data-copy="batteryRepPre">Copy Report</button>
+        </div>
+        <h3>Battery Hardware &amp; Charging Parameters</h3>
+        <table class="list" id="batTable">
+          <thead><tr><th>Parameter</th><th>Value</th><th>Unit / Notes</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>Device Tree Include (battery_profile.dtsi)</h3>
+        <pre id="batteryDtsiPre" class="code"></pre>
+        <h3>Kernel C Header (cust_battery_meter.h)</h3>
+        <pre id="batteryHdrPre" class="code"></pre>
+        <h3>Comprehensive Battery Report (BATTERY_REPORT.md)</h3>
+        <pre id="batteryRepPre" class="code"></pre>
       </div>
 
       <div id="tab-files" class="tab-pane hidden">
