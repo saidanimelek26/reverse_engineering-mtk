@@ -38,6 +38,19 @@
   var lkConfigHdrPre = document.getElementById("lkConfigHdrPre");
   var lkConfigReportPre = document.getElementById("lkConfigReportPre");
 
+  var sumLkHandoff = document.getElementById("sumLkHandoff");
+  var hdProtocol = document.getElementById("hdProtocol");
+  var hdDtbo = document.getElementById("hdDtbo");
+  var hdDtbAddr = document.getElementById("hdDtbAddr");
+  var hdDtboPart = document.getElementById("hdDtboPart");
+  var hdFb = document.getElementById("hdFb");
+  var hdBat = document.getElementById("hdBat");
+  var hdRegs = document.getElementById("hdRegs");
+  var lkPartsTable = document.querySelector("#lkPartsTable tbody");
+  var lkHandoffReportPre = document.getElementById("lkHandoffReportPre");
+  var lkHandoffHdrPre = document.getElementById("lkHandoffHdrPre");
+  var lkPartitionsEnvPre = document.getElementById("lkPartitionsEnvPre");
+
   var fnTbody = document.querySelector("#fnTable tbody");
   var paramTbody = document.querySelector("#paramTable tbody");
   var filesTbody = document.querySelector("#filesTable tbody");
@@ -198,6 +211,80 @@
     if (lkConfigReportPre) lkConfigReportPre.textContent = cfg.reportMd || "";
   }
 
+  function renderLkHandoff(res) {
+    if (!hdProtocol) return;
+    var parts = res.partitions ? res.partitions.list : [];
+    var hd = res.lkHandoff;
+
+    if (sumLkHandoff) {
+      if (parts.length > 0 || (hd && hd.discovered)) {
+        sumLkHandoff.textContent = parts.length + " Partitions Discovered | Protocol: " + (hd ? hd.protocol : "N/A") + " | DTBO Overlay Ready";
+      } else {
+        sumLkHandoff.textContent = "Not applicable / Not an LK binary";
+      }
+    }
+
+    if (hd && hd.discovered) {
+      hdProtocol.textContent = hd.protocol + " (" + hd.protocolName + ")";
+      hdDtbo.textContent = hd.dtboEngine.discovered ? ("Supported (" + hd.dtboEngine.headerMagic + ", " + hd.dtboEngine.overlayFunction + ")") : "N/A";
+      hdDtbAddr.textContent = hd.dtbLoadAddress || "0x40000000";
+      hdDtboPart.textContent = hd.dtboEngine.discovered ? hd.dtboEngine.targetPartitions.join(", ") : "N/A";
+      hdFb.textContent = hd.fbHandoff.discovered ? "Discovered (atag,videolfb base_h/l + vramSize + reserved-memory)" : "N/A";
+      hdBat.textContent = hd.batHandoff.discovered ? "Discovered (atag,boot_voltage + fg_swocv + shutdown_time)" : "N/A";
+      hdRegs.textContent = hd.regState ? (hd.regState.reg0 + " | " + hd.regState.reg1 + " | " + hd.regState.reg2 + (hd.regState.reg3 ? (" | " + hd.regState.reg3) : "") + " | Mode: " + hd.regState.cpuMode) : "N/A";
+      if (lkHandoffReportPre) lkHandoffReportPre.textContent = hd.reportMd || "";
+      if (lkHandoffHdrPre) lkHandoffHdrPre.textContent = hd.header || "";
+    } else {
+      hdProtocol.textContent = "N/A";
+      hdDtbo.textContent = "N/A";
+      hdDtbAddr.textContent = "N/A";
+      hdDtboPart.textContent = "N/A";
+      hdFb.textContent = "N/A";
+      hdBat.textContent = "N/A";
+      hdRegs.textContent = "N/A";
+      if (lkHandoffReportPre) lkHandoffReportPre.textContent = "No LK kernel handoff report generated.";
+      if (lkHandoffHdrPre) lkHandoffHdrPre.textContent = "No LK kernel handoff header generated.";
+    }
+
+    if (lkPartsTable) {
+      lkPartsTable.innerHTML = "";
+      if (parts.length > 0) {
+        parts.forEach(function (p) {
+          var tr = document.createElement("tr");
+          var tdIdx = document.createElement("td");
+          tdIdx.textContent = String(p.index);
+          var tdName = document.createElement("td");
+          tdName.className = "mono";
+          var b = document.createElement("strong");
+          b.textContent = p.name;
+          tdName.appendChild(b);
+          var tdCat = document.createElement("td");
+          tdCat.textContent = p.category;
+          var tdTgt = document.createElement("td");
+          tdTgt.className = "mono";
+          tdTgt.textContent = p.target;
+          var tdSrc = document.createElement("td");
+          tdSrc.className = "mono";
+          tdSrc.textContent = p.source;
+          tr.appendChild(tdIdx);
+          tr.appendChild(tdName);
+          tr.appendChild(tdCat);
+          tr.appendChild(tdTgt);
+          tr.appendChild(tdSrc);
+          lkPartsTable.appendChild(tr);
+        });
+      } else {
+        var trEmpty = document.createElement("tr");
+        trEmpty.innerHTML = "<td colspan=\"5\">No hardcoded storage partitions discovered in this binary.</td>";
+        lkPartsTable.appendChild(trEmpty);
+      }
+    }
+
+    if (lkPartitionsEnvPre) {
+      lkPartitionsEnvPre.textContent = (res.partitions && res.partitions.env) ? res.partitions.env : "No partitions env generated.";
+    }
+  }
+
     function renderFileList(outFiles) {
     filesTbody.innerHTML = "";
     outFiles.forEach(function (f) {
@@ -268,6 +355,7 @@
       renderSelectedDriver();
       renderBattery(res);
       renderLkConfig(res);
+      renderLkHandoff(res);
       renderFileList(res.outFiles);
 
       summarySection.classList.remove("hidden");

@@ -30,6 +30,7 @@
           <tr><th>Framework</th><td id="sumFw">-</td><th>Active Driver</th><td id="sumActive" class="mono">-</td></tr>
           <tr><th>Battery &amp; Charging</th><td id="sumBat" colspan="3" class="mono">-</td></tr>
           <tr><th>LK Config Symbols</th><td id="sumLkConfig" colspan="3" class="mono">-</td></tr>
+          <tr><th>LK Partitions &amp; Handoff</th><td id="sumLkHandoff" colspan="3" class="mono">-</td></tr>
         </tbody>
       </table>
       <div class="driver-row">
@@ -49,6 +50,7 @@
         <button type="button" class="tab" data-tab="init">Init Table (.txt)</button>
         <button type="button" class="tab" data-tab="battery">Battery &amp; Charging</button>
         <button type="button" class="tab" data-tab="lkconfig">LK Config (BootShim)</button>
+        <button type="button" class="tab" data-tab="lkhandoff">LK Partitions &amp; Kernel Handoff</button>
         <button type="button" class="tab" data-tab="files">out/ Files</button>
       </div>
 
@@ -125,6 +127,34 @@
         <pre id="lkConfigHdrPre" class="code"></pre>
         <h3>Full Report (LK_CONFIG_REPORT.md)</h3>
         <pre id="lkConfigReportPre" class="code"></pre>
+      </div>
+
+      <div id="tab-lkhandoff" class="tab-pane hidden">
+        <div class="pane-actions">
+          <button type="button" class="copy-btn" data-copy="lkHandoffReportPre">Copy Handoff Report</button>
+          <button type="button" class="copy-btn" data-copy="lkHandoffHdrPre">Copy C Header</button>
+          <button type="button" class="copy-btn" data-copy="lkPartitionsEnvPre">Copy Partitions Env</button>
+        </div>
+        <h3>Kernel &amp; Device Tree Handoff Architecture</h3>
+        <table class="grid" id="lkHandoffSummaryTable">
+          <tbody>
+            <tr><th>Boot Handoff Protocol</th><td id="hdProtocol" class="mono">-</td><th>DTBO Overlay Strategy</th><td id="hdDtbo" class="mono">-</td></tr>
+            <tr><th>DTB Load Address</th><td id="hdDtbAddr" class="mono">-</td><th>Target DTBO Partition</th><td id="hdDtboPart" class="mono">-</td></tr>
+            <tr><th>Display / Framebuffer</th><td id="hdFb" class="mono">-</td><th>Battery &amp; PMIC Telemetry</th><td id="hdBat" class="mono">-</td></tr>
+            <tr><th>CPU Entry Registers</th><td id="hdRegs" colspan="3" class="mono">-</td></tr>
+          </tbody>
+        </table>
+        <h3>Discovered Storage Partitions</h3>
+        <table class="list" id="lkPartsTable">
+          <thead><tr><th>#</th><th>Partition Name</th><th>Category / Role</th><th>Block Device Target</th><th>Discovery Evidence</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>Full Report (LK_KERNEL_HANDOFF_REPORT.md)</h3>
+        <pre id="lkHandoffReportPre" class="code"></pre>
+        <h3>C Header Interface (lk_kernel_handoff.h)</h3>
+        <pre id="lkHandoffHdrPre" class="code"></pre>
+        <h3>Partitions Environment (lk_partitions.env)</h3>
+        <pre id="lkPartitionsEnvPre" class="code"></pre>
       </div>
 
       <div id="tab-files" class="tab-pane hidden">

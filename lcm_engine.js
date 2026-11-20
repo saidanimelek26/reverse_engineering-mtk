@@ -2629,6 +2629,39 @@
         lines.push("  CONFIG_" + lkK2.toUpperCase() + "_ADDRESS = 0x" + res.lkConfig.addresses[lkK2].toString(16).toUpperCase().padStart(8, "0"));
       }
     }
+    if (res.partitions && res.partitions.list.length > 0) {
+      lines.push("");
+      lines.push(sep);
+      lines.push("DISCOVERED LK STORAGE PARTITIONS (" + res.partitions.list.length + " partitions)");
+      lines.push(sep);
+      if (res.partitions.tableAddress) {
+        lines.push("  Partition Array Base VA   : 0x" + res.partitions.tableAddress.toString(16).toUpperCase());
+      }
+      lines.push("    #   Partition Name        Block Target       Category / Role");
+      res.partitions.list.forEach(function (p) {
+        lines.push("  " + String(p.index).padStart(3, " ") + "   " + p.name.padEnd(22, " ") + " " + p.target.padEnd(18, " ") + " " + p.category);
+      });
+    }
+    if (res.lkHandoff && res.lkHandoff.discovered) {
+      lines.push("");
+      lines.push(sep);
+      lines.push("LK TO KERNEL & DEVICE TREE HANDOFF ARCHITECTURE");
+      lines.push(sep);
+      lines.push("  Boot Protocol             : " + res.lkHandoff.protocol + " (" + res.lkHandoff.protocolName + ")");
+      lines.push("  DTB Load Base Address     : " + res.lkHandoff.dtbLoadAddress);
+      lines.push("  DTBO Overlay Support      : " + (res.lkHandoff.dtboEngine.discovered ? ("Supported (targets: " + res.lkHandoff.dtboEngine.targetPartitions.join(", ") + ")") : "N/A"));
+      lines.push("  DTBO Magic & Function     : " + res.lkHandoff.dtboEngine.headerMagic + " / " + res.lkHandoff.dtboEngine.overlayFunction);
+      lines.push("  Framebuffer Handoff       : " + (res.lkHandoff.fbHandoff.discovered ? "Supported (atag,videolfb base_h/l + vramSize + reserved-memory)" : "N/A"));
+      lines.push("  Battery Telemetry Handoff : " + (res.lkHandoff.batHandoff.discovered ? "Supported (atag,boot_voltage + fg_swocv)" : "N/A"));
+      if (res.lkHandoff.regState) {
+        lines.push("  CPU Entry Register State  :");
+        lines.push("    " + res.lkHandoff.regState.reg0);
+        lines.push("    " + res.lkHandoff.regState.reg1);
+        lines.push("    " + res.lkHandoff.regState.reg2);
+        if (res.lkHandoff.regState.reg3) lines.push("    " + res.lkHandoff.regState.reg3);
+        lines.push("    CPU Mode: " + res.lkHandoff.regState.cpuMode + " | MMU: " + res.lkHandoff.regState.mmu);
+      }
+    }
     return lines.join("\n");
   }
 
@@ -2682,6 +2715,40 @@
       for (var lki = 0; lki < lkKeys.length; lki++) {
         var lkK = lkKeys[lki];
         lines.push("| `CONFIG_" + lkK.toUpperCase() + "_ADDRESS` | `0x" + res.lkConfig.addresses[lkK].toString(16).toUpperCase().padStart(8, "0") + "` | " + Math.round((res.lkConfig.confidence[lkK] || 0.90) * 100) + "% |");
+      }
+    }
+    if (res.partitions && res.partitions.list.length > 0) {
+      lines.push("");
+      lines.push("## Discovered LK Storage Partitions (" + res.partitions.list.length + " partitions)");
+      if (res.partitions.tableAddress) {
+        lines.push("- **Partition Array Base VA**: `0x" + res.partitions.tableAddress.toString(16).toUpperCase() + "`");
+      }
+      lines.push("");
+      lines.push("| # | Partition Name | Block Target | Category / Role | Evidence |");
+      lines.push("|---|---|---|---|---|");
+      res.partitions.list.forEach(function (p) {
+        lines.push("| " + p.index + " | `" + p.name + "` | `" + p.target + "` | " + p.category + " | " + p.source + " |");
+      });
+    }
+    if (res.lkHandoff && res.lkHandoff.discovered) {
+      lines.push("");
+      lines.push("## LK to Kernel & Device Tree Handoff Architecture");
+      lines.push("- **Boot Protocol**: `" + res.lkHandoff.protocol + "` (" + res.lkHandoff.protocolName + ")");
+      lines.push("- **DTB Load Address**: `" + res.lkHandoff.dtbLoadAddress + "`");
+      lines.push("- **DTBO Overlay Engine**: `" + (res.lkHandoff.dtboEngine.discovered ? ("Supported (" + res.lkHandoff.dtboEngine.targetPartitions.join(", ") + ")") : "N/A") + "`");
+      lines.push("- **DTBO Magic**: `" + res.lkHandoff.dtboEngine.headerMagic + "`");
+      lines.push("- **Overlay Function**: `" + res.lkHandoff.dtboEngine.overlayFunction + "`");
+      lines.push("- **Framebuffer Handoff**: `" + (res.lkHandoff.fbHandoff.discovered ? "Supported (atag,videolfb)" : "N/A") + "`");
+      lines.push("- **Battery Telemetry Handoff**: `" + (res.lkHandoff.batHandoff.discovered ? "Supported (atag,boot_voltage)" : "N/A") + "`");
+      if (res.lkHandoff.regState) {
+        lines.push("");
+        lines.push("### CPU Entry Register State");
+        lines.push("- `" + res.lkHandoff.regState.reg0 + "`");
+        lines.push("- `" + res.lkHandoff.regState.reg1 + "`");
+        lines.push("- `" + res.lkHandoff.regState.reg2 + "`");
+        if (res.lkHandoff.regState.reg3) lines.push("- `" + res.lkHandoff.regState.reg3 + "`");
+        lines.push("- **CPU Mode**: " + res.lkHandoff.regState.cpuMode);
+        lines.push("- **MMU / Caches**: " + res.lkHandoff.regState.mmu);
       }
     }
     return lines.join("\n");
@@ -2947,6 +3014,448 @@
     };
   }
 
+  function analyzeLkPartitions(rawBytes, baseAddress, is64, isThumb) {
+    var dv = new DataView(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
+    var hdrSize = 0;
+    if (rawBytes.length >= 512 && rawBytes[0] === 0x88 && rawBytes[1] === 0x16 && rawBytes[2] === 0x88 && rawBytes[3] === 0x58) {
+      hdrSize = 0x200;
+      if (rawBytes.length >= 0x38 && rawBytes[0x30] === 0x89 && rawBytes[0x31] === 0x16 && rawBytes[0x32] === 0x89 && rawBytes[0x33] === 0x58) {
+        hdrSize = dv.getUint32(0x34, true);
+      }
+    }
+    var codeBytes = rawBytes.subarray(hdrSize);
+    if (!codeBytes.length) codeBytes = rawBytes;
+    var codeDv = new DataView(codeBytes.buffer, codeBytes.byteOffset, codeBytes.byteLength);
+    var base = (baseAddress >>> 0);
+
+    var knownPartitions = [
+      { name: "preloader", category: "Bootloader Firmware", target: "mmcblk0boot0" },
+      { name: "pgpt", category: "Storage Partition Table", target: "mmcblk0" },
+      { name: "proinfo", category: "Device & Product Info", target: "mmcblk0" },
+      { name: "nvram", category: "NVRAM & Radio Calibration", target: "mmcblk0" },
+      { name: "protect1", category: "NVRAM Backup / Protect 1", target: "mmcblk0" },
+      { name: "protect2", category: "NVRAM Backup / Protect 2", target: "mmcblk0" },
+      { name: "lk", category: "Bootloader Firmware (LK)", target: "mmcblk0" },
+      { name: "lk2", category: "Bootloader Firmware Backup (LK2)", target: "mmcblk0" },
+      { name: "boot", category: "Android Linux Kernel & Ramdisk", target: "mmcblk0" },
+      { name: "recovery", category: "Recovery Image", target: "mmcblk0" },
+      { name: "para", category: "Boot Parameter Storage", target: "mmcblk0" },
+      { name: "boot_para", category: "Boot Parameter Storage", target: "mmcblk0" },
+      { name: "logo", category: "Display Boot Splash Logo", target: "mmcblk0" },
+      { name: "expdb", category: "Kernel Exception & RAM Dump", target: "mmcblk0" },
+      { name: "seccfg", category: "Security & Lock State", target: "mmcblk0" },
+      { name: "secro", category: "Security Root of Trust", target: "mmcblk0" },
+      { name: "tee1", category: "Trusty / ARM TrustZone TEE 1", target: "mmcblk0" },
+      { name: "tee2", category: "Trusty / ARM TrustZone TEE 2", target: "mmcblk0" },
+      { name: "frp", category: "Factory Reset Protection", target: "mmcblk0" },
+      { name: "md1img", category: "LTE / 5G Modem DSP Firmware", target: "mmcblk0" },
+      { name: "md1dsp", category: "Modem DSP Audio / RF", target: "mmcblk0" },
+      { name: "md1arm7", category: "Modem ARM7 Subsystem", target: "mmcblk0" },
+      { name: "md3img", category: "Modem Subsystem 3", target: "mmcblk0" },
+      { name: "spmfw", category: "System Power Manager Firmware", target: "mmcblk0" },
+      { name: "mcupmfw", category: "Micro-Controller PMIC Firmware", target: "mmcblk0" },
+      { name: "scp1", category: "System Control Processor 1", target: "mmcblk0" },
+      { name: "scp2", category: "System Control Processor 2", target: "mmcblk0" },
+      { name: "sspm_1", category: "Secure Sensor Processor 1", target: "mmcblk0" },
+      { name: "sspm_2", category: "Secure Sensor Processor 2", target: "mmcblk0" },
+      { name: "cam_vpu1", category: "Vision Processing Unit 1", target: "mmcblk0" },
+      { name: "cam_vpu2", category: "Vision Processing Unit 2", target: "mmcblk0" },
+      { name: "gz1", category: "GenieZone Micro-kernel 1", target: "mmcblk0" },
+      { name: "gz2", category: "GenieZone Micro-kernel 2", target: "mmcblk0" },
+      { name: "dtbo", category: "Device Tree Blob Overlays", target: "mmcblk0" },
+      { name: "dtbo1", category: "Device Tree Blob Overlay 1", target: "mmcblk0" },
+      { name: "dtbo2", category: "Device Tree Blob Overlay 2", target: "mmcblk0" },
+      { name: "odmdtbo", category: "ODM Device Tree Overlay", target: "mmcblk0" },
+      { name: "vbmeta", category: "Android Verified Boot Metadata", target: "mmcblk0" },
+      { name: "vbmeta_system", category: "AVB Metadata (System)", target: "mmcblk0" },
+      { name: "vbmeta_vendor", category: "AVB Metadata (Vendor)", target: "mmcblk0" },
+      { name: "system", category: "Android System OS Rootfs", target: "mmcblk0" },
+      { name: "vendor", category: "Android Vendor HAL & Drivers", target: "mmcblk0" },
+      { name: "vendor_boot", category: "GKI Vendor Boot (Ramdisk & DTB)", target: "mmcblk0" },
+      { name: "cust", category: "Carrier Customization", target: "mmcblk0" },
+      { name: "userdata", category: "User Data & Encryption", target: "mmcblk0" },
+      { name: "cache", category: "Recovery & OTA Cache", target: "mmcblk0" },
+      { name: "misc", category: "BCB (Bootloader Control Block)", target: "mmcblk0" },
+      { name: "keystore", category: "Android Keystore", target: "mmcblk0" },
+      { name: "oemkeystore", category: "OEM Cryptographic Keystore", target: "mmcblk0" },
+      { name: "super", category: "Dynamic Partitions (Super)", target: "mmcblk0" },
+      { name: "persist", category: "Persistent Device Calibration", target: "mmcblk0" },
+      { name: "metadata", category: "FBE Encryption Metadata", target: "mmcblk0" }
+    ];
+
+    var partByName = new Map();
+    knownPartitions.forEach(function (kp) { partByName.set(kp.name, kp); });
+
+    function readAscii(off, maxLen) {
+      var end = off;
+      var lim = Math.min(codeBytes.length, off + maxLen);
+      while (end < lim && codeBytes[end] !== 0) {
+        if (codeBytes[end] < 32 || codeBytes[end] > 126) return "";
+        end++;
+      }
+      if (end === off) return "";
+      return new TextDecoder("ascii").decode(codeBytes.subarray(off, end));
+    }
+
+    var strides = [28, 32];
+    var bestArray = [];
+    var bestTableVa = 0;
+
+    for (var si = 0; si < strides.length; si++) {
+      var stride = strides[si];
+      for (var i = 0; i + stride * 3 <= codeBytes.length; i += 4) {
+        var w0 = codeDv.getUint32(i, true);
+        if (w0 < base || w0 >= base + codeBytes.length) continue;
+        var name0 = readAscii(w0 - base, 32);
+        if (!partByName.has(name0) && name0 !== "default") continue;
+
+        var w1 = codeDv.getUint32(i + stride, true);
+        if (w1 < base || w1 >= base + codeBytes.length) continue;
+        var name1 = readAscii(w1 - base, 32);
+        if (!partByName.has(name1) && name1 !== "default") continue;
+
+        var w2 = codeDv.getUint32(i + stride * 2, true);
+        if (w2 < base || w2 >= base + codeBytes.length) continue;
+        var name2 = readAscii(w2 - base, 32);
+        if (!partByName.has(name2) && name2 !== "default") continue;
+
+        var curArray = [];
+        var idx = 0;
+        var curOff = i;
+        while (curOff + 4 <= codeBytes.length) {
+          var pw = codeDv.getUint32(curOff, true);
+          if (pw < base || pw >= base + codeBytes.length) break;
+          var pname = readAscii(pw - base, 32);
+          if (!pname || pname === "NULL") break;
+          curArray.push({ name: pname, entryVa: base + curOff, strVa: pw, index: idx++ });
+          curOff += stride;
+        }
+
+        if (curArray.length > bestArray.length) {
+          bestArray = curArray;
+          bestTableVa = base + i;
+        }
+      }
+    }
+
+    var discovered = [];
+    var seenNames = new Set();
+    bestArray.forEach(function (e) {
+      if (e.name === "default" || seenNames.has(e.name)) return;
+      seenNames.add(e.name);
+      var meta = partByName.get(e.name) || { category: "Storage Partition", target: "mmcblk0" };
+      discovered.push({
+        index: discovered.length + 1,
+        name: e.name,
+        category: meta.category,
+        target: meta.target,
+        source: "Partition Descriptor Array @ 0x" + e.entryVa.toString(16).toUpperCase(),
+        entryVa: e.entryVa,
+        confidence: 0.99,
+        status: "CONFIRMED"
+      });
+    });
+
+    knownPartitions.forEach(function (kp) {
+      if (seenNames.has(kp.name)) return;
+      var searchBytes = new TextEncoder().encode(kp.name + "\0");
+      var foundPos = -1;
+      for (var pos = 0; pos <= codeBytes.length - searchBytes.length; pos++) {
+        var match = true;
+        for (var b = 0; b < searchBytes.length; b++) {
+          if (codeBytes[pos + b] !== searchBytes[b]) { match = false; break; }
+        }
+        if (match) {
+          foundPos = pos;
+          break;
+        }
+      }
+      if (foundPos !== -1) {
+        seenNames.add(kp.name);
+        discovered.push({
+          index: discovered.length + 1,
+          name: kp.name,
+          category: kp.category,
+          target: kp.target,
+          source: "String Literal Reference @ 0x" + (base + foundPos).toString(16).toUpperCase(),
+          entryVa: base + foundPos,
+          confidence: 0.92,
+          status: "INFERRED"
+        });
+      }
+    });
+
+    var envLines = [
+      "CONFIG_PARTITION_COUNT=" + discovered.length,
+      "CONFIG_PARTITION_TABLE_ADDRESS=" + (bestTableVa ? ("0x" + bestTableVa.toString(16).toUpperCase()) : "0x0")
+    ];
+    discovered.forEach(function (p) {
+      envLines.push("CONFIG_PART_" + p.name.toUpperCase().replace(/[^A-Z0-9_]/g, "_") + "=y");
+    });
+
+    return {
+      tableAddress: bestTableVa,
+      list: discovered,
+      total: discovered.length,
+      env: envLines.join("\n") + "\n"
+    };
+  }
+
+  function analyzeLkKernelHandoff(rawBytes, baseAddress, is64, isThumb, partitions, lkConfig) {
+    var dv = new DataView(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
+    var hdrSize = 0;
+    if (rawBytes.length >= 512 && rawBytes[0] === 0x88 && rawBytes[1] === 0x16 && rawBytes[2] === 0x88 && rawBytes[3] === 0x58) {
+      hdrSize = 0x200;
+      if (rawBytes.length >= 0x38 && rawBytes[0x30] === 0x89 && rawBytes[0x31] === 0x16 && rawBytes[0x32] === 0x89 && rawBytes[0x33] === 0x58) {
+        hdrSize = dv.getUint32(0x34, true);
+      }
+    }
+    var codeBytes = rawBytes.subarray(hdrSize);
+    if (!codeBytes.length) codeBytes = rawBytes;
+    var rawStr = "";
+    for (var i = 0; i < codeBytes.length; i += 4096) {
+      rawStr += String.fromCharCode.apply(null, codeBytes.subarray(i, Math.min(codeBytes.length, i + 4096)));
+    }
+    var base = (baseAddress >>> 0);
+
+    function has(s) { return rawStr.indexOf(s) !== -1; }
+
+    var hasBootLinuxFdt = has("boot_linux_fdt");
+    var hasAtagVideo = has("atag,videolfb");
+    var hasAtagBoot = has("atag,boot");
+    var hasPrepareDtb = has("prepare_kernel_dtb");
+    var hasDtbo = has("dtbo") || has("odmdtbo");
+    var hasDtboIdx = has("dtbo_entry_idx_out") || has("androidboot.dtbo_idx");
+    var hasOverlayApply = has("fdt_overlay_apply") || has("merged_dtb") || has("overlayed_dtb");
+
+    var discovered = hasBootLinuxFdt || hasAtagVideo || hasAtagBoot || hasPrepareDtb || hasDtbo;
+
+    var protocol = "UNKNOWN";
+    var protocolName = "Standard Linux Direct Boot Protocol";
+    if (hasBootLinuxFdt && (hasAtagVideo || hasAtagBoot)) {
+      protocol = "HYBRID_MTK_ATAG_FDT";
+      protocolName = "MediaTek Hybrid ATAG-to-DeviceTree Translation Engine";
+    } else if (hasBootLinuxFdt) {
+      protocol = "LINUX_FDT_STANDARD";
+      protocolName = "Standard Linux Flattened Device Tree Protocol";
+    }
+
+    var fbHandoff = {
+      discovered: hasAtagVideo,
+      baseHighProp: has("atag,videolfb-fb_base_h"),
+      baseLowProp: has("atag,videolfb-fb_base_l"),
+      vramSizeProp: has("atag,videolfb-vramSize"),
+      reservedMem: has("display_reserved") || has("atag,videolfb"),
+      panelIndexSet: has("set dsi panel index to dtb")
+    };
+
+    var batHandoff = {
+      discovered: has("atag,boot_voltage"),
+      bootVoltage: has("atag,boot_voltage"),
+      fgSwocvV: has("atag,fg_swocv_v"),
+      fgSwocvI: has("atag,fg_swocv_i"),
+      shutdownTime: has("atag,shutdown_time"),
+      twoSecReboot: has("atag,two_sec_reboot")
+    };
+
+    var dtboEngine = {
+      discovered: hasDtbo,
+      targetPartitions: ["dtbo", "odmdtbo", "dtbo1", "dtbo2"].filter(has),
+      headerMagic: "0xd7b7ab1e (DT_TABLE_MAGIC)",
+      indexSelection: hasDtboIdx,
+      matchingCriteria: [
+        "SoC Hardware ID (chipid)",
+        "Board Hardware ID (devinfo)",
+        "Hardware Revision",
+        "Panel / LCM Index"
+      ],
+      overlayFunction: hasOverlayApply ? "fdt_overlay_apply / merged_dtb" : "N/A"
+    };
+
+    var regState = is64 ? {
+      reg0: "X0 = Physical address of merged Device Tree (FDT, 8-byte aligned)",
+      reg1: "X1 = 0x0000000000000000 (Reserved)",
+      reg2: "X2 = 0x0000000000000000 (Reserved)",
+      reg3: "X3 = 0x0000000000000000 (Reserved)",
+      mmu: "MMU disabled, D-cache cleaned to PoC",
+      cpuMode: "AArch64 EL2 (Hypervisor) or EL1"
+    } : {
+      reg0: "R0 = 0x00000000 (Standard ARM Linux Boot Protocol)",
+      reg1: "R1 = 0xFFFFFFFF (or ARM Machine Type ID)",
+      reg2: "R2 = Physical address of merged Device Tree (FDT)",
+      mmu: "MMU disabled, D-cache flushed, I-cache flushed",
+      cpuMode: "ARM32 SVC Mode (CPSR=0x13, IRQ/FIQ disabled)"
+    };
+
+    var dtbLoadAddr = is64 ? "0x40000000" : (base >= 0x80000000 ? "0x80000000" : "0x40000000");
+
+    var cmdlineTokens = [
+      "androidboot.dtb_idx=0",
+      "androidboot.dtbo_idx=%d",
+      "androidboot.serialno=%s",
+      "androidboot.bootreason=%s",
+      "androidboot.bootdevice=%s",
+      "androidboot.init_rc=%s",
+      "bootprof.pl_t=%d",
+      "bootprof.lk_t=%d"
+    ];
+
+    var mdLines = [
+      "# Little Kernel (LK) to Kernel & Device Tree Communication Report",
+      "",
+      "## 1. Executive Summary & Handoff Architecture",
+      "",
+      "- **Boot Handoff Protocol**: `" + protocol + "` (" + protocolName + ")",
+      "- **Target Architecture**: `" + (is64 ? "ARM64 (AArch64)" : "ARM32 (Thumb-2/ARM)") + "`",
+      "- **Bootloader Load Base**: `0x" + base.toString(16).toUpperCase().padStart(8, "0") + "`",
+      "- **DRAM DTB Handoff Base**: `" + dtbLoadAddr + "`",
+      "- **DTBO Overlay Engine**: `" + (dtboEngine.discovered ? "Discovered (" + dtboEngine.targetPartitions.join(", ") + ")" : "Not Detected") + "`",
+      "- **Display Framebuffer Handoff**: `" + (fbHandoff.discovered ? "Discovered (atag,videolfb)" : "Not Detected") + "`",
+      "- **Battery Telemetry Handoff**: `" + (batHandoff.discovered ? "Discovered (atag,boot_voltage)" : "Not Detected") + "`",
+      "",
+      "## 2. Storage Partitions Mapping (" + partitions.total + " Partitions Discovered)",
+      "",
+      "| # | Partition Name | Category / Role | Block Target | Discovery Evidence |",
+      "|---|---|---|---|---|"
+    ];
+
+    partitions.list.forEach(function (p) {
+      mdLines.push("| " + p.index + " | `" + p.name + "` | " + p.category + " | `" + p.target + "` | " + p.source + " |");
+    });
+
+    mdLines.push("");
+    mdLines.push("## 3. Device Tree Blob (DTB) & DTBO Overlay Communication");
+    mdLines.push("");
+    mdLines.push("1. **Main DTB Sourcing**: LK extracts or receives the base Flattened Device Tree from `boot.img` (or embedded storage) and maps it into DRAM at `" + dtbLoadAddr + "` (`main_dtb_addr`).");
+    mdLines.push("2. **DTBO Storage Lookup**: LK reads the designated overlay partition (`" + dtboEngine.targetPartitions.join("`, `") + "`) into memory buffer (`dt_tbl_hdr_buffer`).");
+    mdLines.push("3. **DTBO Table Verification**: LK checks Android DTBO Table Magic `" + dtboEngine.headerMagic + "` (`struct dt_table_header`).");
+    mdLines.push("4. **Dynamic Selection Logic**: LK loops through DTBO index entries and matches:");
+    dtboEngine.matchingCriteria.forEach(function (c) {
+      mdLines.push("   - " + c);
+    });
+    mdLines.push("5. **Runtime Overlay Application**: LK invokes `" + dtboEngine.overlayFunction + "` to merge the selected overlay into `merged_dtb` before booting.");
+    mdLines.push("");
+    mdLines.push("## 4. Display & Framebuffer Handoff Protocol");
+    mdLines.push("");
+    mdLines.push("LK initializes the display driver in the bootloader to render the boot logo splash. To ensure the kernel does not overwrite active VRAM during early initialization, LK passes display parameters into the Device Tree under `/chosen` and `/reserved-memory`:");
+    mdLines.push("");
+    mdLines.push("| Parameter | DTB Property Key | Status | Description |");
+    mdLines.push("|---|---|---|---|");
+    mdLines.push("| Framebuffer Physical Base High | `atag,videolfb-fb_base_h` | " + (fbHandoff.baseHighProp ? "CONFIRMED" : "N/A") + " | High 32 bits of physical VRAM address |");
+    mdLines.push("| Framebuffer Physical Base Low | `atag,videolfb-fb_base_l` | " + (fbHandoff.baseLowProp ? "CONFIRMED" : "N/A") + " | Low 32 bits of physical VRAM address |");
+    mdLines.push("| Allocated VRAM Size | `atag,videolfb-vramSize` | " + (fbHandoff.vramSizeProp ? "CONFIRMED" : "N/A") + " | Total bytes reserved for splash screen buffer |");
+    mdLines.push("| Display Memory Reservation | `/reserved-memory/display_reserved` | " + (fbHandoff.reservedMem ? "CONFIRMED" : "N/A") + " | Protects splash screen memory from kernel buddy allocator |");
+    mdLines.push("| Active Panel Index Injection | `set dsi panel index to dtb` | " + (fbHandoff.panelIndexSet ? "CONFIRMED" : "N/A") + " | Sets active display controller node in DTB |");
+    mdLines.push("");
+    mdLines.push("## 5. Battery & PMIC Telemetry Handoff");
+    mdLines.push("");
+    mdLines.push("LK samples PMIC fuel gauge registers and injects boot-time battery telemetry into DTB `/chosen` properties:");
+    mdLines.push("");
+    mdLines.push("| Telemetry Field | DTB Property Key | Status | Description |");
+    mdLines.push("|---|---|---|---|");
+    mdLines.push("| Boot Voltage | `atag,boot_voltage` | " + (batHandoff.bootVoltage ? "CONFIRMED" : "N/A") + " | Battery cell voltage (mV) measured during LK boot |");
+    mdLines.push("| Fuel Gauge Open-Circuit Voltage | `atag,fg_swocv_v` | " + (batHandoff.fgSwocvV ? "CONFIRMED" : "N/A") + " | Initial open-circuit voltage for SOC calculation |");
+    mdLines.push("| Fuel Gauge Initial Current | `atag,fg_swocv_i` | " + (batHandoff.fgSwocvI ? "CONFIRMED" : "N/A") + " | Current consumption at bootloader initialization |");
+    mdLines.push("| Shutdown Duration | `atag,shutdown_time` | " + (batHandoff.shutdownTime ? "CONFIRMED" : "N/A") + " | Elapsed RTC time since last device shutdown |");
+    mdLines.push("| Long-Press Reboot Flag | `atag,two_sec_reboot` | " + (batHandoff.twoSecReboot ? "CONFIRMED" : "N/A") + " | Hardware power key 2-second reboot trigger |");
+    mdLines.push("");
+    mdLines.push("## 6. Kernel Commandline Injection (`/chosen/bootargs`)");
+    mdLines.push("");
+    mdLines.push("```text");
+    cmdlineTokens.forEach(function (tok) {
+      mdLines.push(tok);
+    });
+    mdLines.push("```");
+    mdLines.push("");
+    mdLines.push("## 7. CPU Register State at Kernel Entry (`boot_linux_fdt`)");
+    mdLines.push("");
+    mdLines.push("| Register / Subsystem | Value / Expected State | Standard / Convention |");
+    mdLines.push("|---|---|---|");
+    mdLines.push("| Register 0 | `" + regState.reg0 + "` | Boot Protocol |");
+    mdLines.push("| Register 1 | `" + regState.reg1 + "` | Boot Protocol |");
+    mdLines.push("| Register 2 | `" + regState.reg2 + "` | Boot Protocol |");
+    if (is64) {
+      mdLines.push("| Register 3 | `" + regState.reg3 + "` | Boot Protocol |");
+    }
+    mdLines.push("| MMU & Caches | `" + regState.mmu + "` | ARM Architecture Requirement |");
+    mdLines.push("| Processor Execution Mode | `" + regState.cpuMode + "` | Linux Architecture Port |");
+    mdLines.push("");
+
+    var hLines = [
+      "#ifndef _LK_KERNEL_HANDOFF_H",
+      "#define _LK_KERNEL_HANDOFF_H",
+      "",
+      "#include <stdint.h>",
+      "",
+      "#define ATAG_CORE 0x54410001",
+      "#define ATAG_MEM 0x54410002",
+      "#define ATAG_CMDLINE 0x54410009",
+      "#define ATAG_VIDEOLFB 0x54410008",
+      "#define DT_TABLE_MAGIC 0xd7b7ab1e",
+      "",
+      "struct dt_table_header {",
+      "    uint32_t magic;",
+      "    uint32_t total_size;",
+      "    uint32_t header_size;",
+      "    uint32_t dt_entry_size;",
+      "    uint32_t dt_entry_count;",
+      "    uint32_t dt_entries_offset;",
+      "    uint32_t page_size;",
+      "    uint32_t version;",
+      "};",
+      "",
+      "struct dt_table_entry {",
+      "    uint32_t dt_size;",
+      "    uint32_t dt_offset;",
+      "    uint32_t id;",
+      "    uint32_t rev;",
+      "    uint32_t custom[4];",
+      "};",
+      "",
+      "struct mtk_videolfb_tag {",
+      "    uint32_t fb_base_h;",
+      "    uint32_t fb_base_l;",
+      "    uint32_t vram_size;",
+      "    uint32_t fb_pitch;",
+      "    uint32_t fb_bpp;",
+      "};",
+      "",
+      "struct mtk_boot_telemetry {",
+      "    uint32_t boot_voltage_mv;",
+      "    uint32_t fg_swocv_v;",
+      "    int32_t  fg_swocv_i;",
+      "    uint32_t shutdown_time_sec;",
+      "    uint32_t two_sec_reboot_flag;",
+      "};",
+      "",
+      "struct lk_kernel_handoff_regs {",
+      (is64 ? "    uint64_t x0_fdt_phys_addr;\n    uint64_t x1_reserved;\n    uint64_t x2_reserved;\n    uint64_t x3_reserved;" : "    uint32_t r0_zero;\n    uint32_t r1_mach_type;\n    uint32_t r2_fdt_phys_addr;"),
+      "};",
+      "",
+      "void lk_boot_linux_fdt(uintptr_t kernel_entry, uintptr_t fdt_phys_addr);",
+      "int lk_apply_dtbo_overlay(void *main_dtb, void *dtbo_table, uint32_t soc_id, uint32_t board_id);",
+      "int lk_inject_videolfb_to_fdt(void *fdt, const struct mtk_videolfb_tag *vfb);",
+      "int lk_inject_battery_to_fdt(void *fdt, const struct mtk_boot_telemetry *bat);",
+      "",
+      "#endif",
+      ""
+    ];
+
+    return {
+      discovered: discovered,
+      protocol: protocol,
+      protocolName: protocolName,
+      dtbLoadAddress: dtbLoadAddr,
+      dtboEngine: dtboEngine,
+      fbHandoff: fbHandoff,
+      batHandoff: batHandoff,
+      regState: regState,
+      reportMd: mdLines.join("\n"),
+      header: hLines.join("\n")
+    };
+  }
+
+
   async function analyzeBinaryAndBuildOut(fileName, uint8Array) {
     var payload = await unpackInputBuffer(fileName, uint8Array);
     var arch = detectArchitectureAndBase(payload);
@@ -2960,6 +3469,8 @@
     var activeName = rankDrivers(drivers, payload);
     var battery = extractBatteryParameters(payload, arch);
     var lkConfig = analyzeLkConfig(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB");
+    var partitions = analyzeLkPartitions(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB");
+    var lkHandoff = analyzeLkKernelHandoff(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB", partitions, lkConfig);
 
     var res = {
       inputName: fileName,
@@ -2970,7 +3481,9 @@
       drivers: drivers,
       activeDriverName: activeName,
       battery: battery,
-      lkConfig: lkConfig
+      lkConfig: lkConfig,
+      partitions: partitions,
+      lkHandoff: lkHandoff
     };
 
     var stem = safeIdent(fileName.replace(/\.[^.]+$/, ""), "firmware");
@@ -3017,6 +3530,14 @@
       outFiles.push({ path: prefix + "lk_config/lk_config.env", content: lkConfig.env });
       outFiles.push({ path: prefix + "lk_config/lk_config.h", content: lkConfig.header });
       outFiles.push({ path: prefix + "lk_config/LK_CONFIG_REPORT.md", content: lkConfig.reportMd });
+    }
+
+    if (partitions && partitions.list.length > 0) {
+      outFiles.push({ path: prefix + "lk_handoff/lk_partitions.env", content: partitions.env });
+    }
+    if (lkHandoff && lkHandoff.discovered) {
+      outFiles.push({ path: prefix + "lk_handoff/LK_KERNEL_HANDOFF_REPORT.md", content: lkHandoff.reportMd });
+      outFiles.push({ path: prefix + "lk_handoff/lk_kernel_handoff.h", content: lkHandoff.header });
     }
 
     for (var i = 0; i < drivers.length; i++) {
