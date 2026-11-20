@@ -1,0 +1,155 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-size: 13px;
+  background: #f5f5f5;
+  color: #111;
+}
+
+.bar {
+  background: #ffffff;
+  border-bottom: 1px solid #cccccc;
+  padding: 10px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.meta {
+  color: #555;
+  font-size: 12px;
+}
+
+.container {
+  max-width: 1180px;
+  margin: 14px auto;
+  padding: 0 14px 28px 14px;
+}
+
+.dropzone,
+.panel {
+  background: #ffffff;
+  border: 1px solid #cccccc;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.dropzone.dragover {
+  border-color: #111;
+  background: #fafafa;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+button,
+select {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  border: 1px solid #888;
+  background: #efefef;
+  color: #111;
+  cursor: pointer;
+}
+
+button:disabled {
+  color: #888;
+  border-color: #bbb;
+  background: #f7f7f7;
+  cursor: default;
+}
+
+.status {
+  margin-top: 8px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #222;
+}
+
+.grid,
+.list {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.grid th,
+.grid td,
+.list th,
+.list td {
+  border: 1px solid #d4d4d4;
+  padding: 5px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.grid th,
+.list th {
+  background: #f0f0f0;
+  font-weight: 600;
+}
+
+.driver-row {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #cccccc;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.tab.active {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.pane-actions {
+  margin-bottom: 6px;
+}
+
+.code {
+  margin: 0;
+  padding: 10px;
+  background: #fafafa;
+  border: 1px solid #dcdcdc;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  max-height: 580px;
+  overflow-y: auto;
+  white-space: pre;
+}
+
+.mono {
+  font-family: Consolas, "Courier New", monospace;
+}
+
+h3 {
+  margin: 10px 0 6px 0;
+  font-size: 13px;
+}
+
+.hidden {
+  display: none;
+}

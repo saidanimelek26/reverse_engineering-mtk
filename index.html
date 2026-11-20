@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LCM Binary Extractor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <strong>LCM Binary Extractor</strong>
+    <span class="meta">Client-side LK / boot.img / vmlinux / zImage / DTB reverse engineering</span>
+  </header>
+
+  <main class="container">
+    <section id="dropZone" class="dropzone">
+      <div class="controls">
+        <input type="file" id="fileInput" accept=".bin,.img,.elf,.dtb,.dtbo,.gz,.xz,*">
+        <button type="button" id="downloadZipBtn" disabled>Download out.zip</button>
+        <button type="button" id="downloadReportBtn" disabled>Download ADDRESSES_REPORT.txt</button>
+      </div>
+      <div id="statusText" class="status">Select or drop lk.bin, boot.img, vmlinux, zImage, or .dtb file. Runs locally in browser.</div>
+    </section>
+
+    <section id="summarySection" class="panel hidden">
+      <table class="grid">
+        <tbody>
+          <tr><th>Input</th><td id="sumFile">-</td><th>Format</th><td id="sumFormat">-</td></tr>
+          <tr><th>Architecture</th><td id="sumArch">-</td><th>Load Base VA</th><td id="sumBase" class="mono">-</td></tr>
+          <tr><th>Framework</th><td id="sumFw">-</td><th>Active Driver</th><td id="sumActive" class="mono">-</td></tr>
+        </tbody>
+      </table>
+      <div class="driver-row">
+        <label for="driverSelect">Driver:</label>
+        <select id="driverSelect"></select>
+        <span id="driverQuickMeta" class="mono"></span>
+      </div>
+    </section>
+
+    <section id="outputSection" class="panel hidden">
+      <div class="tabs" id="tabBar">
+        <button type="button" class="tab active" data-tab="report">ADDRESSES_REPORT.txt</button>
+        <button type="button" class="tab" data-tab="tables">Functions &amp; Timings</button>
+        <button type="button" class="tab" data-tab="lk">LK (.c)</button>
+        <button type="button" class="tab" data-tab="kernel">Kernel MTK (.c)</button>
+        <button type="button" class="tab" data-tab="drm">DRM Panel (.c + .dtsi)</button>
+        <button type="button" class="tab" data-tab="init">Init Table (.txt)</button>
+        <button type="button" class="tab" data-tab="files">out/ Files</button>
+      </div>
+
+      <div id="tab-report" class="tab-pane">
+        <pre id="reportPre" class="code"></pre>
+      </div>
+
+      <div id="tab-tables" class="tab-pane hidden">
+        <h3>Callback Functions</h3>
+        <table class="list" id="fnTable">
+          <thead><tr><th>Slot</th><th>Role</th><th>Virtual Address</th><th>File Offset</th><th>Mode</th><th>Size</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>Hardware Timings &amp; DSI Configuration</h3>
+        <table class="list" id="paramTable">
+          <thead><tr><th>Parameter</th><th>Value</th><th>Struct Location</th><th>Writer VA</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="tab-lk" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="lkPre">Copy LK C Code</button></div>
+        <pre id="lkPre" class="code"></pre>
+      </div>
+
+      <div id="tab-kernel" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="kernelPre">Copy Kernel C Code</button></div>
+        <pre id="kernelPre" class="code"></pre>
+      </div>
+
+      <div id="tab-drm" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="drmPre">Copy DRM + DTSI</button></div>
+        <pre id="drmPre" class="code"></pre>
+      </div>
+
+      <div id="tab-init" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="initPre">Copy Table</button></div>
+        <pre id="initPre" class="code"></pre>
+      </div>
+
+      <div id="tab-files" class="tab-pane hidden">
+        <table class="list" id="filesTable">
+          <thead><tr><th>Path Inside Archive</th><th>Bytes</th><th>Action</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="zip_builder.js"></script>
+  <script src="arm_emulator.js"></script>
+  <script src="lcm_engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
