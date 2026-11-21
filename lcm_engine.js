@@ -245,6 +245,200 @@
     return out;
   }
 
+  function decompileFdtToDts(fdtBytes) {
+    if (!fdtBytes || fdtBytes.length < 40) return "";
+    var dv = new DataView(fdtBytes.buffer, fdtBytes.byteOffset, fdtBytes.byteLength);
+    var magic = dv.getUint32(0, false);
+    if (magic !== 0xd00dfeed) return "";
+    var totalSize = dv.getUint32(4, false);
+    var offStruct = dv.getUint32(8, false);
+    var offStrings = dv.getUint32(12, false);
+    var offRsvmap = dv.getUint32(16, false);
+    var version = dv.getUint32(20, false);
+
+    var lines = [];
+    lines.push("/dts-v1/;");
+    lines.push("");
+
+    var rsvPos = offRsvmap;
+    while (rsvPos + 16 <= fdtBytes.length) {
+      var rsvAddrHi = dv.getUint32(rsvPos, false);
+      var rsvAddrLo = dv.getUint32(rsvPos + 4, false);
+      var rsvSizeHi = dv.getUint32(rsvPos + 8, false);
+      var rsvSizeLo = dv.getUint32(rsvPos + 12, false);
+      rsvPos += 16;
+      if (rsvAddrHi === 0 && rsvAddrLo === 0 && rsvSizeHi === 0 && rsvSizeLo === 0) break;
+      var rAddr = (BigInt(rsvAddrHi) << 32n) | BigInt(rsvAddrLo);
+      var rSize = (BigInt(rsvSizeHi) << 32n) | BigInt(rsvSizeLo);
+      lines.push("/memreserve/ 0x" + rAddr.toString(16) + " 0x" + rSize.toString(16) + ";");
+    }
+    if (lines.length > 2) lines.push("");
+
+    function getString(off) {
+      var strOff = offStrings + off;
+      var strBytes = [];
+      while (strOff < fdtBytes.length && fdtBytes[strOff] !== 0) {
+        strBytes.push(fdtBytes[strOff]);
+        strOff++;
+      }
+      return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(strBytes));
+    }
+
+    function isPrintableAscii(u8) {
+      if (u8.length === 0) return false;
+      if (u8[u8.length - 1] !== 0) return false;
+      var hasNonZero = false;
+      for (var i = 0; i < u8.length - 1; i++) {
+        var c = u8[i];
+        if (c === 0) {
+          if (i === u8.length - 1) break;
+          return isPrintableStringList(u8);
+        }
+        if (c < 32 || c > 126) {
+          if (c !== 9 && c !== 10 && c !== 13) return false;
+        }
+        hasNonZero = true;
+      }
+      return hasNonZero;
+    }
+
+    function isPrintableStringList(u8) {
+      var parts = [];
+      var start = 0;
+      for (var i = 0; i < u8.length; i++) {
+        if (u8[i] === 0) {
+          if (i > start) {
+            for (var j = start; j < i; j++) {
+              var c = u8[j];
+              if (c < 32 || c > 126) {
+                if (c !== 9 && c !== 10 && c !== 13) return false;
+              }
+            }
+            parts.push(new TextDecoder("utf-8").decode(u8.subarray(start, i)));
+          }
+          start = i + 1;
+        }
+      }
+      return parts.length > 0;
+    }
+
+    function formatPropertyValue(propName, valBytes) {
+      if (valBytes.length === 0) return "";
+      if (isPrintableAscii(valBytes)) {
+        var strs = [];
+        var sStart = 0;
+        for (var s = 0; s < valBytes.length; s++) {
+          if (valBytes[s] === 0) {
+            if (s >= sStart) {
+              strs.push(JSON.stringify(new TextDecoder("utf-8").decode(valBytes.subarray(sStart, s))));
+            }
+            sStart = s + 1;
+          }
+        }
+        if (strs.length > 0) return " = " + strs.join(", ");
+      }
+      if (valBytes.length % 4 === 0) {
+        var words = [];
+        var vdv = new DataView(valBytes.buffer, valBytes.byteOffset, valBytes.byteLength);
+        for (var w = 0; w < valBytes.length; w += 4) {
+          var wv = vdv.getUint32(w, false);
+          words.push("0x" + wv.toString(16));
+        }
+        return " = <" + words.join(" ") + ">";
+      }
+      var hexBytes = [];
+      for (var b = 0; b < valBytes.length; b++) {
+        var hb = valBytes[b].toString(16);
+        hexBytes.push((hb.length === 1 ? "0" : "") + hb);
+      }
+      return " = [" + hexBytes.join(" ") + "]";
+    }
+
+    var pos = offStruct;
+    var indentLevel = 0;
+    var nodeStack = [];
+
+    while (pos + 4 <= fdtBytes.length) {
+      var tag = dv.getUint32(pos, false);
+      pos += 4;
+
+      if (tag === 0x00000001) {
+        var nameStart = pos;
+        while (pos < fdtBytes.length && fdtBytes[pos] !== 0) pos++;
+        var nName = new TextDecoder("utf-8", { fatal: false }).decode(fdtBytes.subarray(nameStart, pos));
+        pos++;
+        pos = (pos + 3) & ~3;
+        var ind = "  ".repeat(indentLevel);
+        if (indentLevel === 0 && (nName === "" || nName === "/")) {
+          lines.push(ind + "/ {");
+        } else {
+          lines.push(ind + (nName || "unnamed") + " {");
+        }
+        nodeStack.push(nName);
+        indentLevel++;
+      } else if (tag === 0x00000002) {
+        indentLevel = Math.max(0, indentLevel - 1);
+        nodeStack.pop();
+        var ind2 = "  ".repeat(indentLevel);
+        lines.push(ind2 + "};");
+      } else if (tag === 0x00000003) {
+        var propLen = dv.getUint32(pos, false);
+        var propNameOff = dv.getUint32(pos + 4, false);
+        pos += 8;
+        var pData = fdtBytes.subarray(pos, pos + propLen);
+        pos += propLen;
+        pos = (pos + 3) & ~3;
+        var pName = getString(propNameOff);
+        var ind3 = "  ".repeat(indentLevel);
+        var formattedVal = formatPropertyValue(pName, pData);
+        lines.push(ind3 + pName + formattedVal + ";");
+      } else if (tag === 0x00000004) {
+        continue;
+      } else if (tag === 0x00000009) {
+        break;
+      } else {
+        break;
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  async function extractKernelConfig(primaryCode, rawData) {
+    var buffers = [primaryCode, rawData];
+    for (var b = 0; b < buffers.length; b++) {
+      var buf = buffers[b];
+      if (!buf || buf.length < 16) continue;
+      for (var i = 0; i <= buf.length - 16; i++) {
+        if (
+          buf[i] === 0x49 && buf[i + 1] === 0x4b && buf[i + 2] === 0x43 && buf[i + 3] === 0x46 &&
+          buf[i + 4] === 0x47 && buf[i + 5] === 0x5f && buf[i + 6] === 0x53 && buf[i + 7] === 0x54
+        ) {
+          var start = i + 8;
+          var end = -1;
+          for (var j = start; j <= Math.min(buf.length - 8, start + 1024 * 1024 * 4); j++) {
+            if (
+              buf[j] === 0x49 && buf[j + 1] === 0x4b && buf[j + 2] === 0x43 && buf[j + 3] === 0x46 &&
+              buf[j + 4] === 0x47 && buf[j + 5] === 0x5f && buf[j + 6] === 0x45 && buf[j + 7] === 0x44
+            ) {
+              end = j;
+              break;
+            }
+          }
+          var gzChunk = end > start ? buf.subarray(start, end) : buf.subarray(start);
+          var decomp = await decompressGzip(gzChunk);
+          if (decomp && decomp.length > 100) {
+            var txt = new TextDecoder("utf-8", { fatal: false }).decode(decomp);
+            if (txt.indexOf("CONFIG_") !== -1) {
+              return txt;
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   function parseMtkPartitions(data) {
     var parts = [];
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -330,7 +524,12 @@
       var sSz = bDv.getUint32(24, true);
       var pageSz = bDv.getUint32(36, true);
       var hdrVer = bDv.getUint32(40, true);
-      if (hdrVer >= 3) pageSz = 4096;
+      if (hdrVer >= 3) {
+        pageSz = 4096;
+        rSz = bDv.getUint32(12, true);
+        kAddr = null;
+        sSz = 0;
+      }
       if (pageSz < 512 || pageSz > 65536) pageSz = 2048;
       var cmdline = asciiAt(bootRaw, 0x40, 512);
       var kOff = pageSz;
@@ -342,8 +541,16 @@
       }
       if (!kDecomp) {
         var lzPos = findBytes(kRaw, [0x04, 0x22, 0x4d, 0x18], 0);
+        if (lzPos === -1) lzPos = findBytes(kRaw, [0x02, 0x21, 0x4c, 0x18], 0);
         if (lzPos !== -1) {
           kDecomp = decompressLz4(kRaw.subarray(lzPos));
+        }
+      }
+      if (!kDecomp && kRaw.length >= 0x30) {
+        var zDv = new DataView(kRaw.buffer, kRaw.byteOffset, kRaw.byteLength);
+        if (zDv.getUint32(0x24, true) === ZIMAGE_MAGIC_LE) {
+          var zGz = findBytes(kRaw, [0x1f, 0x8b, 0x08], 0);
+          if (zGz !== -1) kDecomp = await decompressGzip(kRaw.subarray(zGz));
         }
       }
       var primary = kDecomp || kRaw;
@@ -358,6 +565,14 @@
         }
       }
       if (!dtbs.length) dtbs = extractEmbeddedDtbs(rawData, "boot_embedded");
+      if (primary && primary !== rawData) {
+        var pDtbs = extractEmbeddedDtbs(primary, "decomp");
+        for (var pdi = 0; pdi < pDtbs.length; pdi++) {
+          if (!dtbs.some(function (d) { return d.bytes.length === pDtbs[pdi].bytes.length; })) {
+            dtbs.push(pDtbs[pdi]);
+          }
+        }
+      }
       return {
         inputName: fileName,
         rawSize: rawData.length,
@@ -517,6 +732,8 @@
     if (rawData.length >= 0x40 && dv.getUint32(0x24, true) === ZIMAGE_MAGIC_LE) {
       var gzZ = findBytes(rawData, [0x1f, 0x8b, 0x08], 0);
       var zDecomp = gzZ !== -1 ? await decompressGzip(rawData.subarray(gzZ)) : null;
+      var zDtbs = extractEmbeddedDtbs(rawData, "zimage");
+      if (!zDtbs.length && zDecomp) zDtbs = extractEmbeddedDtbs(zDecomp, "zimage_decomp");
       return {
         inputName: fileName,
         rawSize: rawData.length,
@@ -525,7 +742,7 @@
         primaryCode: zDecomp || rawData,
         codeFileOffset: 0,
         headerLoadAddress: null,
-        dtbs: extractEmbeddedDtbs(rawData.subarray(Math.max(0, rawData.length - 512 * 1024)), "zimage"),
+        dtbs: zDtbs,
         subPartitions: [],
         metadata: {}
       };
@@ -540,7 +757,7 @@
         primaryCode: rawData,
         codeFileOffset: 0,
         headerLoadAddress: null,
-        dtbs: [],
+        dtbs: extractEmbeddedDtbs(rawData, "arm64_image"),
         subPartitions: [],
         metadata: { textOffset: Number(dv.getBigUint64(8, true)) }
       };
@@ -549,6 +766,8 @@
     if (rawData.length >= 32 && rawData[0] === 0x1f && rawData[1] === 0x8b && rawData[2] === 0x08) {
       var gDecomp = await decompressGzip(rawData);
       if (gDecomp) {
+        var gDtbs = extractEmbeddedDtbs(rawData, "gzip_kernel");
+        if (!gDtbs.length) gDtbs = extractEmbeddedDtbs(gDecomp, "gzip_decomp");
         return {
           inputName: fileName,
           rawSize: rawData.length,
@@ -557,7 +776,7 @@
           primaryCode: gDecomp,
           codeFileOffset: 0,
           headerLoadAddress: null,
-          dtbs: [],
+          dtbs: gDtbs,
           subPartitions: [],
           metadata: {}
         };
@@ -3924,6 +4143,7 @@
     var lkConfig = analyzeLkConfig(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB");
     var partitions = analyzeLkPartitions(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB");
     var lkHandoff = analyzeLkKernelHandoff(payload.primaryCode.length > 0 ? payload.primaryCode : uint8Array, arch.baseAddress, arch.is64, arch.architecture === "THUMB", partitions, lkConfig);
+    var kConfig = await extractKernelConfig(payload.primaryCode, uint8Array);
 
     var res = {
       inputName: fileName,
@@ -3936,12 +4156,32 @@
       battery: battery,
       lkConfig: lkConfig,
       partitions: partitions,
-      lkHandoff: lkHandoff
+      lkHandoff: lkHandoff,
+      kernelConfig: kConfig,
+      dtsSource: null
     };
 
     var stem = safeIdent(fileName.replace(/\.[^.]+$/, ""), "firmware");
     var prefix = "out/" + stem + "/";
     var outFiles = [];
+
+    var dtsSources = [];
+    for (var di = 0; di < payload.dtbs.length; di++) {
+      var dtsText = decompileFdtToDts(payload.dtbs[di].bytes);
+      if (dtsText) {
+        dtsSources.push(dtsText);
+        outFiles.push({ path: prefix + "device_tree/dtb_" + di + ".dts", content: dtsText });
+      }
+    }
+    var dtsSource = dtsSources.length > 0 ? dtsSources.join("\n\n") : null;
+    res.dtsSource = dtsSource;
+    if (dtsSource) {
+      outFiles.push({ path: prefix + "device_tree/device_tree.dts", content: dtsSource });
+    }
+    if (kConfig) {
+      outFiles.push({ path: prefix + "kernel/kernel_config.txt", content: kConfig });
+      outFiles.push({ path: prefix + "kernel/defconfig", content: kConfig });
+    }
 
     outFiles.push({ path: prefix + "ADDRESSES_REPORT.txt", content: buildAddressesReportTxt(res) });
     outFiles.push({ path: prefix + "ADDRESSES_REPORT.md", content: buildAddressesReportMd(res) });
@@ -4029,6 +4269,10 @@
 
   var api = {
     analyzeBinaryAndBuildOut: analyzeBinaryAndBuildOut,
+    decompileFdtToDts: decompileFdtToDts,
+    extractKernelConfig: extractKernelConfig,
+    extractEmbeddedDtbs: extractEmbeddedDtbs,
+    unpackInputBuffer: unpackInputBuffer,
     toHex: toHex,
     vaToFileOff: vaToFileOff
   };

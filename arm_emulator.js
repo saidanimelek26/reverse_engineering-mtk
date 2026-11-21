@@ -1239,7 +1239,21 @@
           if (r2 >= 1 && r2 <= 32 && r0 <= 0xff && self.isReadable(r1)) {
             for (var b2 = 0; b2 < r2; b2++) arg1Bytes.push(self.readU8((r1 + b2) >>> 0));
           }
-          if (self.isReadable(r0) && r1 >= 1 && r1 <= 1024 && (r2 === 0 || r2 === 1 || r2 === 2)) {
+          if (slotOff === 0x24 || slotOff === 0x48) {
+            var opsV3 = tryDecodeSettingTableV3(self.data, self.baseAddress, r0, r1);
+            if (opsV3.length >= 2) {
+              decodedTable = { version: "V3", ops: opsV3 };
+            } else {
+              decodedTable = decodeSettingTable(self.data, self.baseAddress, r0, r1);
+            }
+          } else if (slotOff === 0x28 || slotOff === 0x50) {
+            var opsV2 = tryDecodeSettingTableV2(self.data, self.baseAddress, r0, r1);
+            if (opsV2.length >= 2) {
+              decodedTable = { version: "V2", ops: opsV2 };
+            } else {
+              decodedTable = decodeSettingTable(self.data, self.baseAddress, r0, r1);
+            }
+          } else if (self.isReadable(r0) && r1 >= 1 && r1 <= 1024 && (r2 === 0 || r2 === 1 || r2 === 2)) {
             decodedTable = decodeSettingTable(self.data, self.baseAddress, r0, r1);
           }
 
@@ -1516,14 +1530,32 @@
   function tryDecodeSettingTableV3(data, baseAddr, tableVa, maxCount) {
     var off = Number(BigInt.asUintN(64, BigInt(tableVa)) - BigInt.asUintN(64, BigInt(baseAddr))) >>> 0;
     if (off < 0 || off + 64 > data.length) return [];
+    var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     maxCount = maxCount || 400;
 
-    var candidateStrides = [68, 67, 132, 131];
+    var candidateConfigs = [
+      { stride: 67, hdr: "byte", paramOff: 3, maxPayload: 64 },
+      { stride: 68, hdr: "byte", paramOff: 3, maxPayload: 64 },
+      { stride: 68, hdr: "byte_pad", paramOff: 4, maxPayload: 64 },
+      { stride: 68, hdr: "short", paramOff: 4, maxPayload: 64 },
+      { stride: 72, hdr: "byte", paramOff: 4, maxPayload: 64 },
+      { stride: 72, hdr: "short_pad", paramOff: 8, maxPayload: 64 },
+      { stride: 76, hdr: "dword", paramOff: 12, maxPayload: 64 },
+      { stride: 80, hdr: "dword", paramOff: 12, maxPayload: 64 },
+      { stride: 131, hdr: "byte", paramOff: 3, maxPayload: 128 },
+      { stride: 132, hdr: "byte", paramOff: 3, maxPayload: 128 },
+      { stride: 132, hdr: "short", paramOff: 4, maxPayload: 128 },
+      { stride: 136, hdr: "short_pad", paramOff: 8, maxPayload: 128 },
+      { stride: 140, hdr: "dword", paramOff: 12, maxPayload: 128 },
+      { stride: 144, hdr: "dword", paramOff: 12, maxPayload: 128 }
+    ];
+
     var bestOps = [];
     var bestScore = 0;
 
-    for (var si = 0; si < candidateStrides.length; si++) {
-      var stride = candidateStrides[si];
+    for (var ci = 0; ci < candidateConfigs.length; ci++) {
+      var cfg = candidateConfigs[ci];
+      var stride = cfg.stride;
       var ops = [];
       var valid = true;
       var foundEnd = false;
@@ -1534,9 +1566,20 @@
         var eOff = off + k * stride;
         if (eOff + stride > data.length) break;
 
-        var id = data[eOff];
-        var cmd = data[eOff + 1];
-        var cnt = data[eOff + 2];
+        var id, cmd, cnt;
+        if (cfg.hdr === "dword") {
+          id = dv.getUint32(eOff, true);
+          cmd = dv.getUint32(eOff + 4, true);
+          cnt = dv.getUint32(eOff + 8, true);
+        } else if (cfg.hdr === "short" || cfg.hdr === "short_pad") {
+          id = data[eOff];
+          cmd = data[eOff + 1];
+          cnt = data[eOff + 2] | (data[eOff + 3] << 8);
+        } else {
+          id = data[eOff];
+          cmd = data[eOff + 1];
+          cnt = data[eOff + 2];
+        }
 
         if (id === 0 && cmd === 0 && cnt === 0) {
           consecutiveZeroes++;
@@ -1552,26 +1595,64 @@
         }
         consecutiveZeroes = 0;
 
-        var maxPayload = stride - 3;
-        if (id === 0xfd || (id === 0x00 && cmd === 0xfd)) {
+        if (id === 0xfffd || id === 0xfd || (id === 0 && (cmd === 0xfd || cmd === 0xfffd))) {
+          foundEnd = true;
+          strictV3Matches++;
+          break;
+        } else if (id === 0xff && cmd === 0xff) {
           foundEnd = true;
           strictV3Matches++;
           break;
         } else if (id === 0x00 && (cmd === 0xff || cmd === 0xfe || cmd === 0xfc || cmd === 0xee)) {
-          var dval = cnt > 0 ? cnt : (data[eOff + 3] | (data[eOff + 4] << 8));
-          ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, dval), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V3", rawEncoding: "V3_DELAY_" + dval + "ms" });
+          var dval = cnt > 0 ? cnt : (data[eOff + cfg.paramOff] | (data[eOff + cfg.paramOff + 1] << 8));
+          ops.push({
+            opType: "DELAY_MS",
+            cmd: null,
+            params: [],
+            delayValue: Math.max(1, dval),
+            pinOrRail: null,
+            pinLevel: null,
+            sourceAddress: (tableVa + k * stride) >>> 0,
+            status: "CONFIRMED",
+            tableVersion: "V3",
+            rawEncoding: "V3_DELAY_" + dval + "ms"
+          });
           strictV3Matches++;
-        } else if (id === 0xfe) {
-          ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, cnt || cmd), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V3", rawEncoding: "V3_DELAY" });
+        } else if (id === 0xfe || id === 0xfffe) {
+          var dval2 = Math.max(1, cnt || cmd);
+          ops.push({
+            opType: "DELAY_MS",
+            cmd: null,
+            params: [],
+            delayValue: dval2,
+            pinOrRail: null,
+            pinLevel: null,
+            sourceAddress: (tableVa + k * stride) >>> 0,
+            status: "CONFIRMED",
+            tableVersion: "V3",
+            rawEncoding: "V3_DELAY"
+          });
+          strictV3Matches++;
         } else if (id === 0x39 || id === 0x15 || id === 0x05 || id === 0x29 || id === 0x03 || id === 0x13 || id === 0x23) {
           if ((id === 0x05 || id === 0x03) && cnt !== 0) { valid = false; break; }
           if ((id === 0x15 || id === 0x13) && cnt !== 1) { valid = false; break; }
           if (id === 0x23 && cnt !== 2) { valid = false; break; }
-          if ((id === 0x39 || id === 0x29) && (cnt < 2 || cnt > maxPayload)) { valid = false; break; }
-          if (cnt <= maxPayload) {
+          if ((id === 0x39 || id === 0x29) && (cnt < 2 || cnt > cfg.maxPayload)) { valid = false; break; }
+          if (cnt <= cfg.maxPayload && eOff + cfg.paramOff + cnt <= data.length) {
             var plist = [];
-            for (var p = 0; p < cnt; p++) plist.push(data[eOff + 3 + p]);
-            ops.push({ opType: (id === 0x03 || id === 0x13 || id === 0x23 || id === 0x29) ? "GENERIC_WRITE" : "DCS_WRITE", cmd: cmd, params: plist, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V3", rawEncoding: "V3_0x" + cmd.toString(16) });
+            for (var p = 0; p < cnt; p++) plist.push(data[eOff + cfg.paramOff + p]);
+            ops.push({
+              opType: (id === 0x03 || id === 0x13 || id === 0x23 || id === 0x29) ? "GENERIC_WRITE" : "DCS_WRITE",
+              cmd: cmd & 0xff,
+              params: plist,
+              delayValue: null,
+              pinOrRail: null,
+              pinLevel: null,
+              sourceAddress: (tableVa + k * stride) >>> 0,
+              status: "CONFIRMED",
+              tableVersion: "V3",
+              rawEncoding: "V3_0x" + (cmd & 0xff).toString(16)
+            });
             strictV3Matches++;
           } else {
             valid = false;
@@ -1602,7 +1683,7 @@
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     maxCount = maxCount || 400;
 
-    var candidateStrides = [72, 136, 76, 80, 140];
+    var candidateStrides = [72, 136];
     var bestOps = [];
     var bestScore = 0;
 
@@ -1617,76 +1698,78 @@
         var eOff = off + k * stride;
         if (eOff + stride > data.length) break;
 
-        if (stride === 72 || stride === 136) {
-          var wCmd = dv.getUint32(eOff, true);
-          var bCnt = data[eOff + 4];
-          if (wCmd === 0 && bCnt === 0) {
-            consecutiveZeroes++;
-            if (consecutiveZeroes >= 2 && ops.length >= 2) {
-              foundEnd = true;
-              break;
-            }
-            if (consecutiveZeroes >= 3) {
-              valid = false;
-              break;
-            }
-            continue;
-          }
-          consecutiveZeroes = 0;
+        var wCmd = dv.getUint32(eOff, true);
+        var bCnt = data[eOff + 4];
 
-          if (wCmd === 0xfffd || wCmd === 0xfff || wCmd === 0xfd) {
+        if (wCmd === 0 && bCnt === 0) {
+          consecutiveZeroes++;
+          if (consecutiveZeroes >= 2 && ops.length >= 2) {
             foundEnd = true;
             break;
-          } else if (wCmd === 0xfffe || wCmd === 0xffe || wCmd === 0xfe) {
-            var dval2 = bCnt > 0 && bCnt < 5000 ? bCnt : (dv.getUint32(eOff + 4, true) || 1);
-            if (dval2 > 5000) dval2 = 10;
-            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: dval2, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" });
-          } else if (wCmd === 0xfffc || wCmd === 0xfc) {
-            ops.push({ opType: "RESET_PIN", cmd: null, params: [], delayValue: null, pinOrRail: "RESET", pinLevel: bCnt & 1, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_RESET_PIN" });
-          } else if (wCmd <= 0xff && bCnt <= (stride - 5)) {
-            var pl4 = [];
-            for (var p4 = 0; p4 < bCnt; p4++) pl4.push(data[eOff + 5 + p4]);
-            ops.push({ opType: "DCS_WRITE", cmd: wCmd, params: pl4, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x" + wCmd.toString(16) });
-          } else {
+          }
+          if (consecutiveZeroes >= 3) {
             valid = false;
             break;
           }
-        } else if (stride === 76 || stride === 80 || stride === 140) {
-          var tId = dv.getUint32(eOff, true);
-          var tCmd = dv.getUint32(eOff + 4, true);
-          var tCnt = dv.getUint32(eOff + 8, true);
-          if (tId === 0 && tCmd === 0 && tCnt === 0) {
-            consecutiveZeroes++;
-            if (consecutiveZeroes >= 2 && ops.length >= 2) {
-              foundEnd = true;
-              break;
-            }
-            if (consecutiveZeroes >= 3) {
-              valid = false;
-              break;
-            }
-            continue;
-          }
-          consecutiveZeroes = 0;
+          continue;
+        }
+        consecutiveZeroes = 0;
 
-          if (tId === 0xfffd || tCmd === 0xfffd || tId === 0xfd || tCmd === 0xfd) {
-            foundEnd = true;
-            break;
-          } else if (tId === 0xfffe || tCmd === 0xfffe || (tId === 0 && tCmd === 0xff)) {
-            ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: Math.max(1, tCnt > 0 && tCnt < 5000 ? tCnt : 10), pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "REGFLAG_DELAY" });
-          } else if (tCmd <= 0xff && tCnt <= (stride - 12)) {
-            var pl5 = [];
-            for (var p5 = 0; p5 < tCnt; p5++) pl5.push(data[eOff + 12 + p5]);
-            ops.push({ opType: "DCS_WRITE", cmd: tCmd, params: pl5, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", tableVersion: "V2", rawEncoding: "V2_0x" + tCmd.toString(16) });
-          } else {
-            valid = false;
-            break;
-          }
+        if (wCmd === 0xfffd || wCmd === 0xfff || wCmd === 0xfd) {
+          foundEnd = true;
+          break;
+        } else if (wCmd === 0xfffe || wCmd === 0xffe || wCmd === 0xfe) {
+          var dval2 = bCnt > 0 && bCnt < 5000 ? bCnt : (dv.getUint32(eOff + 4, true) || 1);
+          if (dval2 > 5000) dval2 = 10;
+          ops.push({
+            opType: "DELAY_MS",
+            cmd: null,
+            params: [],
+            delayValue: dval2,
+            pinOrRail: null,
+            pinLevel: null,
+            sourceAddress: (tableVa + k * stride) >>> 0,
+            status: "CONFIRMED",
+            tableVersion: "V2",
+            rawEncoding: "REGFLAG_DELAY"
+          });
+        } else if (wCmd === 0xfffc || wCmd === 0xfc) {
+          ops.push({
+            opType: "RESET_PIN",
+            cmd: null,
+            params: [],
+            delayValue: null,
+            pinOrRail: "RESET",
+            pinLevel: bCnt & 1,
+            sourceAddress: (tableVa + k * stride) >>> 0,
+            status: "CONFIRMED",
+            tableVersion: "V2",
+            rawEncoding: "REGFLAG_RESET_PIN"
+          });
+        } else if (wCmd <= 0xff) {
+          var pLen = Math.min(bCnt, stride - 5);
+          var pl4 = [];
+          for (var p4 = 0; p4 < pLen; p4++) pl4.push(data[eOff + 5 + p4]);
+          ops.push({
+            opType: "DCS_WRITE",
+            cmd: wCmd,
+            params: pl4,
+            delayValue: null,
+            pinOrRail: null,
+            pinLevel: null,
+            sourceAddress: (tableVa + k * stride) >>> 0,
+            status: "CONFIRMED",
+            tableVersion: "V2",
+            rawEncoding: "V2_0x" + wCmd.toString(16)
+          });
+        } else {
+          valid = false;
+          break;
         }
       }
 
-      if (valid && (foundEnd || ops.length >= 3)) {
-        var dcsCount = ops.filter(function (o) { return o.opType === "DCS_WRITE" || o.opType === "GENERIC_WRITE"; }).length;
+      if (valid && (foundEnd || ops.length >= 2)) {
+        var dcsCount = ops.filter(function (o) { return o.opType === "DCS_WRITE"; }).length;
         var score = dcsCount * 10 + (foundEnd ? 50 : 0);
         if (score > bestScore) {
           bestScore = score;
@@ -1789,6 +1872,8 @@
     for (var i = 0; i < vals.length; i++) {
       var v3Ops = tryDecodeSettingTableV3(data, baseAddr, vals[i], 400);
       if (v3Ops.length >= 2) return v3Ops;
+      var v2Ops = tryDecodeSettingTableV2(data, baseAddr, vals[i], 400);
+      if (v2Ops.length >= 2) return v2Ops;
       var ops = tryDecodeStaticSettingTable(data, baseAddr, vals[i]);
       if (ops.length >= 2) return ops;
     }

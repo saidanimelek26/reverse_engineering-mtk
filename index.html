@@ -28,6 +28,7 @@
           <tr><th>Input</th><td id="sumFile">-</td><th>Format</th><td id="sumFormat">-</td></tr>
           <tr><th>Architecture</th><td id="sumArch">-</td><th>Load Base VA</th><td id="sumBase" class="mono">-</td></tr>
           <tr><th>Framework</th><td id="sumFw">-</td><th>Active Driver</th><td id="sumActive" class="mono">-</td></tr>
+          <tr><th>Kernel Config</th><td id="sumKernelConfig" class="mono">-</td><th>Device Tree</th><td id="sumDts" class="mono">-</td></tr>
           <tr><th>Battery &amp; Charging</th><td id="sumBat" colspan="3" class="mono">-</td></tr>
           <tr><th>LK Config Symbols</th><td id="sumLkConfig" colspan="3" class="mono">-</td></tr>
           <tr><th>LK Partitions &amp; Handoff</th><td id="sumLkHandoff" colspan="3" class="mono">-</td></tr>
@@ -48,6 +49,8 @@
         <button type="button" class="tab" data-tab="kernel">Kernel MTK (.c)</button>
         <button type="button" class="tab" data-tab="drm">DRM Panel (.c + .dtsi)</button>
         <button type="button" class="tab" data-tab="init">Init Table (.txt)</button>
+        <button type="button" class="tab" data-tab="config">Kernel Config (.config)</button>
+        <button type="button" class="tab" data-tab="dts">Device Tree (.dts)</button>
         <button type="button" class="tab" data-tab="battery">Battery &amp; Charging</button>
         <button type="button" class="tab" data-tab="lkconfig">LK Config (BootShim)</button>
         <button type="button" class="tab" data-tab="lkhandoff">LK Partitions &amp; Kernel Handoff</button>
@@ -155,6 +158,16 @@
         <pre id="lkHandoffHdrPre" class="code"></pre>
         <h3>Partitions Environment (lk_partitions.env)</h3>
         <pre id="lkPartitionsEnvPre" class="code"></pre>
+      </div>
+
+      <div id="tab-config" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="configPre">Copy Kernel Config</button></div>
+        <pre id="configPre" class="code"></pre>
+      </div>
+
+      <div id="tab-dts" class="tab-pane hidden">
+        <div class="pane-actions"><button type="button" class="copy-btn" data-copy="dtsPre">Copy Device Tree (DTS)</button></div>
+        <pre id="dtsPre" class="code"></pre>
       </div>
 
       <div id="tab-files" class="tab-pane hidden">

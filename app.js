@@ -18,6 +18,8 @@
   var sumActive = document.getElementById("sumActive");
   var sumBat = document.getElementById("sumBat");
   var sumLkConfig = document.getElementById("sumLkConfig");
+  var sumKernelConfig = document.getElementById("sumKernelConfig");
+  var sumDts = document.getElementById("sumDts");
 
   var driverSelect = document.getElementById("driverSelect");
   var driverQuickMeta = document.getElementById("driverQuickMeta");
@@ -28,6 +30,8 @@
   var kernelPre = document.getElementById("kernelPre");
   var drmPre = document.getElementById("drmPre");
   var initPre = document.getElementById("initPre");
+  var configPre = document.getElementById("configPre");
+  var dtsPre = document.getElementById("dtsPre");
   var batTable = document.querySelector("#batTable tbody");
   var batteryDtsiPre = document.getElementById("batteryDtsiPre");
   var batteryHdrPre = document.getElementById("batteryHdrPre");
@@ -357,6 +361,15 @@
       renderLkConfig(res);
       renderLkHandoff(res);
       renderFileList(res.outFiles);
+
+      if (sumKernelConfig) {
+        sumKernelConfig.textContent = res.kernelConfig ? (Math.round(res.kernelConfig.length / 1024) + " KB extracted (IKCFG_ST)") : "Not found in binary";
+      }
+      if (sumDts) {
+        sumDts.textContent = res.dtsSource ? (res.payload.dtbs.length + " DTB(s) decompiled (" + res.dtsSource.split("\n").length + " lines)") : "Not found in binary";
+      }
+      if (configPre) configPre.textContent = res.kernelConfig || "No kernel config (.config) found in this binary.";
+      if (dtsPre) dtsPre.textContent = res.dtsSource || "No device tree (DTB) found in this binary.";
 
       summarySection.classList.remove("hidden");
       outputSection.classList.remove("hidden");
