@@ -79,7 +79,7 @@
   function ArmMicroEmulator(data, baseAddress, architecture) {
     this.data = data;
     this.dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    this.baseAddress = baseAddress >>> 0;
+    this.baseAddress = typeof baseAddress === "bigint" ? Number(BigInt.asUintN(32, baseAddress)) >>> 0 : (Number(baseAddress || 0) >>> 0);
     this.endAddress = (this.baseAddress + data.length) >>> 0;
     this.architecture = architecture || "ARM32";
     this.paramsBuf = new Uint8Array(0x2000);
@@ -1128,6 +1128,7 @@
   };
 
   ArmMicroEmulator.prototype.executeGetParams = function (getParamsVa, bufSize, maxSteps) {
+    if (getParamsVa) getParamsVa = typeof getParamsVa === "bigint" ? Number(BigInt.asUintN(32, getParamsVa)) >>> 0 : (Number(getParamsVa) >>> 0);
     bufSize = bufSize || 0x600;
     maxSteps = maxSteps || 800;
     this.resetScratch();
@@ -1189,6 +1190,8 @@
   };
 
   ArmMicroEmulator.prototype.executeWithUtilTraps = function (setUtilVa, targetVa, maxSteps, windowRadius) {
+    if (setUtilVa) setUtilVa = typeof setUtilVa === "bigint" ? Number(BigInt.asUintN(32, setUtilVa)) >>> 0 : (Number(setUtilVa) >>> 0);
+    if (targetVa) targetVa = typeof targetVa === "bigint" ? Number(BigInt.asUintN(32, targetVa)) >>> 0 : (Number(targetVa) >>> 0);
     maxSteps = maxSteps || 20000;
     windowRadius = windowRadius || 0x2400;
     this.resetScratch();
@@ -1373,10 +1376,14 @@
 
   function resolvePointerLiterals(data, baseAddr, fnVa, maxBytes) {
     maxBytes = maxBytes || 0x400;
-    var isThumb = (fnVa & 1) !== 0;
-    var clean = (fnVa & ~1) >>> 0;
-    var startOff = (clean - baseAddr) >>> 0;
-    if (startOff >= data.length) return [];
+    var bBig = BigInt(baseAddr || 0);
+    var fBig = BigInt(fnVa || 0);
+    var isThumb = Number(fBig & 1n) !== 0;
+    var clean = fBig & ~1n;
+    var diff = clean - bBig;
+    if (diff < 0n || diff >= BigInt(data.length)) return [];
+    var startOff = Number(diff);
+    var baseNum = Number(BigInt.asUintN(32, bBig)) >>> 0;
     var endOff = Math.min(data.length, startOff + maxBytes);
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     var vals = [];
@@ -1404,16 +1411,16 @@
           continue;
         }
         if ((hw1 & 0xf800) === 0x4800) {
-          var curPc = (baseAddr + pos) >>> 0;
+          var curPc = (baseNum + pos) >>> 0;
           var litAddr = (((curPc + 4) & ~3) + ((hw1 & 0xff) * 4)) >>> 0;
-          var litOff = (litAddr - baseAddr) >>> 0;
+          var litOff = (litAddr - baseNum) >>> 0;
           if (litOff + 4 <= data.length) {
             var lval = dv.getUint32(litOff, true);
             vals.push(lval);
             var pcrel = (((curPc + 4) & ~3) + lval) >>> 0;
-            if (pcrel >= baseAddr && pcrel < baseAddr + data.length) vals.push(pcrel);
-            var baserel = (baseAddr + lval) >>> 0;
-            if (baserel >= baseAddr && baserel < baseAddr + data.length) vals.push(baserel);
+            if (pcrel >= baseNum && pcrel < baseNum + data.length) vals.push(pcrel);
+            var baserel = (baseNum + lval) >>> 0;
+            if (baserel >= baseNum && baserel < baseNum + data.length) vals.push(baserel);
           }
         } else if ((hw1 & 0xfe00) === 0xbc00 && (hw1 & 0x0100) !== 0) {
           break;
@@ -1438,10 +1445,10 @@
           if (litA + 4 <= data.length) {
             var lvalA = dv.getUint32(litA, true);
             vals.push(lvalA);
-            var pcrelA = (baseAddr + off + 8 + lvalA) >>> 0;
-            if (pcrelA >= baseAddr && pcrelA < baseAddr + data.length) vals.push(pcrelA);
-            var baserelA = (baseAddr + lvalA) >>> 0;
-            if (baserelA >= baseAddr && baserelA < baseAddr + data.length) vals.push(baserelA);
+            var pcrelA = (baseNum + off + 8 + lvalA) >>> 0;
+            if (pcrelA >= baseNum && pcrelA < baseNum + data.length) vals.push(pcrelA);
+            var baserelA = (baseNum + lvalA) >>> 0;
+            if (baserelA >= baseNum && baserelA < baseNum + data.length) vals.push(baserelA);
           }
         } else if ((w & 0x0fff0fff) === 0x012fff1e || ((w & 0x0fff8000) === 0x08bd8000)) {
           break;
@@ -1528,8 +1535,10 @@
   }
 
   function tryDecodeSettingTableV3(data, baseAddr, tableVa, maxCount) {
-    var off = Number(BigInt.asUintN(64, BigInt(tableVa)) - BigInt.asUintN(64, BigInt(baseAddr))) >>> 0;
-    if (off < 0 || off + 64 > data.length) return [];
+    if (tableVa === null || tableVa === undefined || baseAddr === null || baseAddr === undefined) return [];
+    var diff = BigInt(tableVa) - BigInt(baseAddr);
+    if (diff < 0n || diff + 64n > BigInt(data.length)) return [];
+    var off = Number(diff);
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     maxCount = maxCount || 400;
 
@@ -1565,6 +1574,7 @@
       for (var k = 0; k < maxCount; k++) {
         var eOff = off + k * stride;
         if (eOff + stride > data.length) break;
+        var srcAddr = typeof tableVa === "bigint" ? tableVa + BigInt(k * stride) : ((Number(tableVa) + k * stride) >>> 0);
 
         var id, cmd, cnt;
         if (cfg.hdr === "dword") {
@@ -1612,7 +1622,7 @@
             delayValue: Math.max(1, dval),
             pinOrRail: null,
             pinLevel: null,
-            sourceAddress: (tableVa + k * stride) >>> 0,
+            sourceAddress: srcAddr,
             status: "CONFIRMED",
             tableVersion: "V3",
             rawEncoding: "V3_DELAY_" + dval + "ms"
@@ -1627,7 +1637,7 @@
             delayValue: dval2,
             pinOrRail: null,
             pinLevel: null,
-            sourceAddress: (tableVa + k * stride) >>> 0,
+            sourceAddress: srcAddr,
             status: "CONFIRMED",
             tableVersion: "V3",
             rawEncoding: "V3_DELAY"
@@ -1648,7 +1658,7 @@
               delayValue: null,
               pinOrRail: null,
               pinLevel: null,
-              sourceAddress: (tableVa + k * stride) >>> 0,
+              sourceAddress: srcAddr,
               status: "CONFIRMED",
               tableVersion: "V3",
               rawEncoding: "V3_0x" + (cmd & 0xff).toString(16)
@@ -1678,8 +1688,10 @@
   }
 
   function tryDecodeSettingTableV2(data, baseAddr, tableVa, maxCount) {
-    var off = Number(BigInt.asUintN(64, BigInt(tableVa)) - BigInt.asUintN(64, BigInt(baseAddr))) >>> 0;
-    if (off < 0 || off + 64 > data.length) return [];
+    if (tableVa === null || tableVa === undefined || baseAddr === null || baseAddr === undefined) return [];
+    var diff = BigInt(tableVa) - BigInt(baseAddr);
+    if (diff < 0n || diff + 64n > BigInt(data.length)) return [];
+    var off = Number(diff);
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     maxCount = maxCount || 400;
 
@@ -1697,6 +1709,7 @@
       for (var k = 0; k < maxCount; k++) {
         var eOff = off + k * stride;
         if (eOff + stride > data.length) break;
+        var srcAddr = typeof tableVa === "bigint" ? tableVa + BigInt(k * stride) : ((Number(tableVa) + k * stride) >>> 0);
 
         var wCmd = dv.getUint32(eOff, true);
         var bCnt = data[eOff + 4];
@@ -1728,7 +1741,7 @@
             delayValue: dval2,
             pinOrRail: null,
             pinLevel: null,
-            sourceAddress: (tableVa + k * stride) >>> 0,
+            sourceAddress: srcAddr,
             status: "CONFIRMED",
             tableVersion: "V2",
             rawEncoding: "REGFLAG_DELAY"
@@ -1741,7 +1754,7 @@
             delayValue: null,
             pinOrRail: "RESET",
             pinLevel: bCnt & 1,
-            sourceAddress: (tableVa + k * stride) >>> 0,
+            sourceAddress: srcAddr,
             status: "CONFIRMED",
             tableVersion: "V2",
             rawEncoding: "REGFLAG_RESET_PIN"
@@ -1757,7 +1770,7 @@
             delayValue: null,
             pinOrRail: null,
             pinLevel: null,
-            sourceAddress: (tableVa + k * stride) >>> 0,
+            sourceAddress: srcAddr,
             status: "CONFIRMED",
             tableVersion: "V2",
             rawEncoding: "V2_0x" + wCmd.toString(16)
@@ -1792,8 +1805,10 @@
   }
 
   function tryDecodeStaticSettingTable(data, baseAddr, tableVa) {
-    var off = (tableVa - baseAddr) >>> 0;
-    if (tableVa < baseAddr || off + 72 > data.length) return [];
+    if (tableVa === null || tableVa === undefined || baseAddr === null || baseAddr === undefined) return [];
+    var diff = BigInt(tableVa) - BigInt(baseAddr);
+    if (diff < 0n || diff + 72n > BigInt(data.length)) return [];
+    var off = Number(diff);
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     var strides32 = [72, 132];
     for (var s = 0; s < strides32.length; s++) {
@@ -1805,11 +1820,12 @@
       for (var k = 0; k < 400; k++) {
         var eOff = off + k * stride;
         if (eOff + stride > data.length) break;
+        var srcAddr = typeof tableVa === "bigint" ? tableVa + BigInt(k * stride) : ((Number(tableVa) + k * stride) >>> 0);
         var cmd = dv.getUint32(eOff, true);
         var cnt = data[eOff + 4];
         if (cmd === 0xfff) {
           foundEnd = true;
-          ops.push({ opType: "END_OF_TABLE", cmd: 0xfff, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "REGFLAG_END_OF_TABLE" });
+          ops.push({ opType: "END_OF_TABLE", cmd: 0xfff, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr, status: "CONFIRMED", rawEncoding: "REGFLAG_END_OF_TABLE" });
           break;
         }
         if (cmd === 0xffe) {
@@ -1817,7 +1833,7 @@
             if (data[eOff + p] !== 0) { valid = false; break; }
           }
           if (!valid) break;
-          ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: cnt, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "REGFLAG_DELAY" });
+          ops.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: cnt, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr, status: "CONFIRMED", rawEncoding: "REGFLAG_DELAY" });
         } else if (cmd <= 0xff && cnt <= cap) {
           for (var t = 5 + cnt; t < stride; t++) {
             if (data[eOff + t] !== 0) { valid = false; break; }
@@ -1825,7 +1841,7 @@
           if (!valid) break;
           var plist = [];
           for (var i = 0; i < cnt; i++) plist.push(data[eOff + 5 + i]);
-          ops.push({ opType: "DCS_WRITE", cmd: cmd, params: plist, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k * stride) >>> 0, status: "CONFIRMED", rawEncoding: "static_table_" + stride });
+          ops.push({ opType: "DCS_WRITE", cmd: cmd, params: plist, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr, status: "CONFIRMED", rawEncoding: "static_table_" + stride });
         } else {
           valid = false;
           break;
@@ -1844,19 +1860,20 @@
       for (var k8 = 0; k8 < 400; k8++) {
         var o8 = off + k8 * st8;
         if (o8 + st8 > data.length) break;
+        var srcAddr8 = typeof tableVa === "bigint" ? tableVa + BigInt(k8 * st8) : ((Number(tableVa) + k8 * st8) >>> 0);
         var cmd8 = data[o8];
         var cnt8 = data[o8 + 1];
         if (cmd8 === 0xff && cnt8 === 0) {
           end8 = true;
-          ops8.push({ opType: "END_OF_TABLE", cmd: 0xff, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k8 * st8) >>> 0, status: "CONFIRMED", rawEncoding: "REGFLAG_END_OF_TABLE" });
+          ops8.push({ opType: "END_OF_TABLE", cmd: 0xff, params: [], delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr8, status: "CONFIRMED", rawEncoding: "REGFLAG_END_OF_TABLE" });
           break;
         }
         if (cmd8 === 0xfe) {
-          ops8.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: cnt8, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k8 * st8) >>> 0, status: "CONFIRMED", rawEncoding: "REGFLAG_DELAY" });
+          ops8.push({ opType: "DELAY_MS", cmd: null, params: [], delayValue: cnt8, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr8, status: "CONFIRMED", rawEncoding: "REGFLAG_DELAY" });
         } else if (cnt8 <= cap8) {
           var p8 = [];
           for (var j8 = 0; j8 < cnt8; j8++) p8.push(data[o8 + 2 + j8]);
-          ops8.push({ opType: "DCS_WRITE", cmd: cmd8, params: p8, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: (tableVa + k8 * st8) >>> 0, status: "CONFIRMED", rawEncoding: "static_table_" + st8 });
+          ops8.push({ opType: "DCS_WRITE", cmd: cmd8, params: p8, delayValue: null, pinOrRail: null, pinLevel: null, sourceAddress: srcAddr8, status: "CONFIRMED", rawEncoding: "static_table_" + st8 });
         } else {
           val8 = false;
           break;
@@ -1883,9 +1900,10 @@
   function extractExpectedIdsStatic(data, baseAddr, fnVa) {
     var vals = resolvePointerLiterals(data, baseAddr, fnVa, 0x400);
     var out = [];
+    var baseNum = typeof baseAddr === "bigint" ? Number(BigInt.asUintN(32, baseAddr)) >>> 0 : (Number(baseAddr || 0) >>> 0);
     for (var i = 0; i < vals.length; i++) {
-      var v = vals[i] >>> 0;
-      if (v > 0xff && v <= 0xffffff && v < baseAddr) {
+      var v = typeof vals[i] === "bigint" ? Number(BigInt.asUintN(32, vals[i])) >>> 0 : (Number(vals[i] || 0) >>> 0);
+      if (v > 0xff && v <= 0xffffff && (baseNum === 0 || v < baseNum)) {
         if (out.indexOf(v) === -1) out.push(v);
       }
     }

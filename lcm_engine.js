@@ -2719,10 +2719,14 @@
 
   function vaToFileOff(va, baseAddr, codeLen, codeFileOff) {
     if (va === null || va === undefined || !codeLen || !baseAddr) return "N/A";
-    var rel = typeof va === "bigint" ? Number(va - BigInt(baseAddr)) : (va - baseAddr);
-    if (rel >= 0 && rel < codeLen) {
-      if (codeFileOff > 0) return "0x" + rel.toString(16).toUpperCase() + " (input +0x" + (codeFileOff + rel).toString(16).toUpperCase() + ")";
-      return "0x" + rel.toString(16).toUpperCase();
+    try {
+      var diff = BigInt(va) - BigInt(baseAddr);
+      if (diff >= 0n && diff < BigInt(codeLen)) {
+        var rel = Number(diff);
+        if (codeFileOff > 0) return "0x" + rel.toString(16).toUpperCase() + " (input +0x" + (codeFileOff + rel).toString(16).toUpperCase() + ")";
+        return "0x" + rel.toString(16).toUpperCase();
+      }
+    } catch (e) {
     }
     return "N/A";
   }
@@ -3450,7 +3454,19 @@
     var payload = rawBytes.subarray(hdrSize);
     if (!payload.length) payload = rawBytes;
 
-    var base = baseAddress || 0;
+    var rawStr = "";
+    try {
+      var dec = new TextDecoder("latin1");
+      rawStr = dec.decode(payload);
+    } catch (e) {
+    }
+
+    var base = 0;
+    if (typeof baseAddress === "bigint") {
+      base = Number(BigInt.asUintN(32, baseAddress)) >>> 0;
+    } else if (baseAddress) {
+      base = (Number(baseAddress) >>> 0);
+    }
     if (base === 0) {
       for (var off = 0x20; off < Math.min(0x300, payload.length - 4); off += 4) {
         var w = dv.getUint32(hdrSize + off, true);
@@ -3462,11 +3478,23 @@
       if (base === 0) base = 0x48000000;
     }
 
-    var rawStr = "";
-    try {
-      var dec = new TextDecoder("latin1");
-      rawStr = dec.decode(payload);
-    } catch (e) {
+    var isLk = hdrName === "LK" || hdrName === "UBOOT" || rawStr.indexOf("kmain") !== -1 || rawStr.indexOf("fastboot") !== -1 || rawStr.indexOf("platform_init") !== -1;
+    if (!isLk && is64) {
+      return {
+        chipset: "UNKNOWN",
+        board: "UNKNOWN",
+        baseAddress: base,
+        bootloaderSize: 0,
+        signatureSize: 0,
+        partitionHeaderName: "NONE",
+        addresses: {},
+        confidence: {},
+        evidence: {},
+        flags: {},
+        env: "",
+        header: "",
+        reportMd: ""
+      };
     }
 
     var chipset = "UNKNOWN";
@@ -3679,7 +3707,7 @@
     var codeBytes = rawBytes.subarray(hdrSize);
     if (!codeBytes.length) codeBytes = rawBytes;
     var codeDv = new DataView(codeBytes.buffer, codeBytes.byteOffset, codeBytes.byteLength);
-    var base = (Number(baseAddress || 0) >>> 0);
+    var base = typeof baseAddress === "bigint" ? (Number(BigInt.asUintN(32, baseAddress)) >>> 0) : (Number(baseAddress || 0) >>> 0);
 
     var knownPartitions = [
       { name: "preloader", category: "Bootloader Firmware", target: "mmcblk0boot0" },
@@ -3869,7 +3897,7 @@
     for (var i = 0; i < codeBytes.length; i += 4096) {
       rawStr += String.fromCharCode.apply(null, codeBytes.subarray(i, Math.min(codeBytes.length, i + 4096)));
     }
-    var base = (Number(baseAddress || 0) >>> 0);
+    var base = typeof baseAddress === "bigint" ? (Number(BigInt.asUintN(32, baseAddress)) >>> 0) : (Number(baseAddress || 0) >>> 0);
 
     function has(s) { return rawStr.indexOf(s) !== -1; }
 
